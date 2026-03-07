@@ -1,0 +1,47 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Allow public read/write for users to enable username/password login
+    // WARNING: This is insecure and should be hardened for production
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+    
+    match /stations/{stationId} {
+      allow read: if true;
+      allow write: if true;
+    }
+    
+    match /vehicles/{vehicleId} {
+      allow read, write: if true;
+    }
+    
+    match /distributions/{distributionId} {
+      allow read, write: if true;
+    }
+    
+    match /transactions/{transactionId} {
+      allow read, write: if true;
+    }
+    
+    match /station_reports/{reportId} {
+      allow read, write: if true;
+    }
+    
+    match /audit_logs/{logId} {
+      allow read, write: if true;
+    }
+    
+    match /vehicle_type_limits/{limitId} {
+      allow read, write: if true;
+    }
+    
+    match /pre_authorized_users/{email} {
+      allow read, write: if true;
+    }
+    
+    match /test/{docId} {
+      allow read: if true;
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "name": "NPFS",
+  "description": "A comprehensive fuel consumption monitoring and analysis system for the National Government of Jaffna (NP), featuring agent interfaces, admin panels, and public lookup portals.",
+  "requestFramePermissions": []
+}

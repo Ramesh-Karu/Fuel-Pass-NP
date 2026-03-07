@@ -1,0 +1,84 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  body {
+    @apply bg-[#F5F5F0] text-[#141414] antialiased min-h-screen relative overflow-x-hidden transition-colors duration-300;
+  }
+  
+  .dark body {
+    @apply bg-[#0A0A0A] text-[#F5F5F0];
+  }
+}
+
+.liquid-bg {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: -1;
+  background: 
+    radial-gradient(circle at 20% 30%, rgba(20, 20, 20, 0.03) 0%, transparent 40%),
+    radial-gradient(circle at 80% 70%, rgba(20, 20, 20, 0.03) 0%, transparent 40%),
+    radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.8) 0%, transparent 100%);
+  filter: blur(80px);
+  animation: liquid 20s ease-in-out infinite alternate;
+}
+
+.dark .liquid-bg {
+  background: 
+    radial-gradient(circle at 20% 30%, rgba(255, 255, 255, 0.03) 0%, transparent 40%),
+    radial-gradient(circle at 80% 70%, rgba(255, 255, 255, 0.03) 0%, transparent 40%),
+    radial-gradient(circle at 50% 50%, rgba(20, 20, 20, 0.8) 0%, transparent 100%);
+}
+
+@keyframes liquid {
+  0% { transform: scale(1) translate(0, 0); }
+  33% { transform: scale(1.1) translate(2%, 3%); }
+  66% { transform: scale(0.9) translate(-3%, 1%); }
+  100% { transform: scale(1.05) translate(1%, -2%); }
+}
+
+.glass-card {
+  @apply bg-white/60 backdrop-blur-xl border border-white/40 shadow-xl shadow-black/5;
+}
+
+.dark .glass-card {
+  @apply bg-black/40 border-white/10 shadow-white/5;
+}
+
+.glass-nav {
+  @apply bg-white/60 backdrop-blur-2xl border border-white/20 sticky top-4 mx-4 rounded-3xl shadow-lg z-50;
+}
+
+.dark .glass-nav {
+  @apply bg-black/40 border-white/10;
+}
+
+.data-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 100px;
+  padding: 1rem;
+  border-bottom: 1px solid rgba(20, 20, 20, 0.1);
+  transition: all 0.2s ease;
+}
+
+.dark .data-row {
+  border-bottom-color: rgba(255, 255, 255, 0.1);
+}
+
+.data-row:hover {
+  background: #141414;
+  color: #F5F5F0;
+}
+
+.dark .data-row:hover {
+  background: #F5F5F0;
+  color: #141414;
+}

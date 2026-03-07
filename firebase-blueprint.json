@@ -1,0 +1,148 @@
+{
+  "entities": {
+    "FuelStation": {
+      "title": "Fuel Station",
+      "description": "A fuel station with its current balances",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "location": { "type": "string" },
+        "balance_petrol_92": { "type": "number" },
+        "balance_petrol_95": { "type": "number" },
+        "balance_diesel": { "type": "number" },
+        "balance_super_diesel": { "type": "number" }
+      },
+      "required": ["name", "location"]
+    },
+    "User": {
+      "title": "User",
+      "description": "System user (Admin, Manager, Agent)",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "agent", "manager", "public"] },
+        "station_id": { "type": "string" },
+        "station_name": { "type": "string" },
+        "status": { "type": "string" },
+        "full_name": { "type": "string" },
+        "nic": { "type": "string" },
+        "address": { "type": "string" },
+        "phone": { "type": "string" }
+      },
+      "required": ["username", "role"]
+    },
+    "PreAuthorizedUser": {
+      "title": "PreAuthorizedUser",
+      "description": "Pre-authorized user email and role",
+      "type": "object",
+      "properties": {
+        "role": { "type": "string", "enum": ["admin", "agent", "manager", "public"] },
+        "station_id": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["role"]
+    },
+    "VehicleTypeLimit": {
+      "title": "Vehicle Type Limit",
+      "description": "Fuel limits for different vehicle types",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string" },
+        "fuel_limit": { "type": "number" },
+        "limit_period": { "type": "string", "enum": ["day", "week", "month"] }
+      },
+      "required": ["type", "fuel_limit"]
+    },
+    "Vehicle": {
+      "title": "Vehicle",
+      "description": "Registered vehicle",
+      "type": "object",
+      "properties": {
+        "id_prefix": { "type": "string" },
+        "id_number": { "type": "string" },
+        "type": { "type": "string" },
+        "user_id": { "type": "string" }
+      },
+      "required": ["id_prefix", "id_number", "type"]
+    },
+    "FuelTransaction": {
+      "title": "Fuel Transaction",
+      "description": "Record of fuel pumping",
+      "type": "object",
+      "properties": {
+        "vehicle_id": { "type": "string" },
+        "id_prefix": { "type": "string" },
+        "id_number": { "type": "string" },
+        "vehicle_type": { "type": "string" },
+        "agent_id": { "type": "string" },
+        "agent_name": { "type": "string" },
+        "station_id": { "type": "string" },
+        "fuel_type": { "type": "string" },
+        "amount": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["vehicle_id", "agent_id", "station_id", "amount", "fuel_type"]
+    },
+    "FuelDistribution": {
+      "title": "Fuel Distribution",
+      "description": "Record of fuel stock addition to a station",
+      "type": "object",
+      "properties": {
+        "station_id": { "type": "string" },
+        "fuel_type": { "type": "string" },
+        "amount": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["station_id", "fuel_type", "amount"]
+    },
+    "AuditLog": {
+      "title": "Audit Log",
+      "description": "Record of system actions",
+      "type": "object",
+      "properties": {
+        "transaction_id": { "type": "string" },
+        "user_id": { "type": "string" },
+        "action": { "type": "string" },
+        "old_value": { "type": "string" },
+        "new_value": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["action", "user_id"]
+    }
+  },
+  "firestore": {
+    "/stations/{stationId}": {
+      "schema": "FuelStation",
+      "description": "Fuel stations collection"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Users collection"
+    },
+    "/pre_authorized_users/{email}": {
+      "schema": "PreAuthorizedUser",
+      "description": "Pre-authorized users collection"
+    },
+    "/vehicle_type_limits/{type}": {
+      "schema": "VehicleTypeLimit",
+      "description": "Vehicle type limits collection"
+    },
+    "/vehicles/{vehicleId}": {
+      "schema": "Vehicle",
+      "description": "Vehicles collection"
+    },
+    "/transactions/{transactionId}": {
+      "schema": "FuelTransaction",
+      "description": "Fuel transactions collection"
+    },
+    "/distributions/{distributionId}": {
+      "schema": "FuelDistribution",
+      "description": "Fuel distributions collection"
+    },
+    "/audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Audit logs collection"
+    }
+  }
+}
