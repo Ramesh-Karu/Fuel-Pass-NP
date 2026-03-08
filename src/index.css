@@ -82,3 +82,19 @@
   background: #F5F5F0;
   color: #141414;
 }
+
+/* Floating Elements Animation */
+@keyframes float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-20px); }
+  100% { transform: translateY(0px); }
+}
+
+.floating {
+  animation: float 6s ease-in-out infinite;
+}
+
+.floating-delayed {
+  animation: float 8s ease-in-out infinite;
+  animation-delay: 2s;
+}

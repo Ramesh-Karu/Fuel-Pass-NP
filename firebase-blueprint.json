@@ -109,6 +109,167 @@
         "timestamp": { "type": "string", "format": "date-time" }
       },
       "required": ["action", "user_id"]
+    },
+    "ChatMessage": {
+      "title": "Chat Message",
+      "description": "Message between user and AI or Admin",
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string" },
+        "sender": { "type": "string", "enum": ["user", "ai", "admin"] },
+        "text": { "type": "string" },
+        "image_url": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["unread", "read"] }
+      },
+      "required": ["user_id", "sender", "text"]
+    },
+    "Complaint": {
+      "title": "Complaint",
+      "description": "User submitted complaint",
+      "type": "object",
+      "properties": {
+        "complaint_id": { "type": "string" },
+        "name": { "type": "string" },
+        "email_phone": { "type": "string" },
+        "nic": { "type": "string" },
+        "type": { "type": "string" },
+        "station_location": { "type": "string" },
+        "incident_date": { "type": "string" },
+        "description": { "type": "string" },
+        "evidence_urls": { "type": "array", "items": { "type": "string" } },
+        "status": { "type": "string", "enum": ["Submitted", "Under Review", "Processing", "Resolved", "Rejected"] },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "user_id": { "type": "string" },
+        "comments": { 
+          "type": "array", 
+          "items": { 
+            "type": "object",
+            "properties": {
+              "user_id": { "type": "string" },
+              "text": { "type": "string" },
+              "role": { "type": "string", "enum": ["admin", "user"] },
+              "timestamp": { "type": "string", "format": "date-time" }
+            }
+          } 
+        }
+      },
+      "required": ["complaint_id", "email_phone", "nic", "type", "description", "status", "timestamp"]
+    },
+    "Invoice": {
+      "title": "Invoice",
+      "description": "Financial invoice",
+      "type": "object",
+      "properties": {
+        "invoice_id": { "type": "string" },
+        "customer_reference": { "type": "string" },
+        "station_or_distributor_name": { "type": "string" },
+        "category": { "type": "string" },
+        "quantity": { "type": "number" },
+        "unit_price": { "type": "number" },
+        "total_amount": { "type": "number" },
+        "payment_method": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "notes": { "type": "string" },
+        "status": { "type": "string", "enum": ["Paid", "Pending", "Cancelled"] },
+        "station_id": { "type": "string" }
+      },
+      "required": ["invoice_id", "total_amount", "date", "status"]
+    },
+    "InvoiceV2": {
+      "title": "Invoice V2",
+      "description": "Financial invoice V2",
+      "type": "object",
+      "properties": {
+        "invoice_id": { "type": "string" },
+        "customer_reference": { "type": "string" },
+        "station_or_distributor_name": { "type": "string" },
+        "category": { "type": "string" },
+        "quantity": { "type": "number" },
+        "unit_price": { "type": "number" },
+        "total_amount": { "type": "number" },
+        "payment_method": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "notes": { "type": "string" },
+        "status": { "type": "string", "enum": ["Paid", "Pending", "Cancelled"] },
+        "station_id": { "type": "string" }
+      },
+      "required": ["invoice_id", "total_amount", "date", "status"]
+    },
+    "Income": {
+      "title": "Income",
+      "description": "Financial income record",
+      "type": "object",
+      "properties": {
+        "income_id": { "type": "string" },
+        "category": { "type": "string" },
+        "amount": { "type": "number" },
+        "payment_method": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "description": { "type": "string" },
+        "station_id": { "type": "string" }
+      },
+      "required": ["income_id", "amount", "date"]
+    },
+    "IncomeV2": {
+      "title": "Income V2",
+      "description": "Financial income record V2",
+      "type": "object",
+      "properties": {
+        "income_id": { "type": "string" },
+        "category": { "type": "string" },
+        "amount": { "type": "number" },
+        "payment_method": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "description": { "type": "string" },
+        "station_id": { "type": "string" }
+      },
+      "required": ["income_id", "amount", "date"]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "Financial expense record",
+      "type": "object",
+      "properties": {
+        "expense_id": { "type": "string" },
+        "category": { "type": "string" },
+        "amount": { "type": "number" },
+        "date": { "type": "string", "format": "date-time" },
+        "payment_method": { "type": "string" },
+        "description": { "type": "string" },
+        "receipt_url": { "type": "string" },
+        "station_id": { "type": "string" }
+      },
+      "required": ["expense_id", "amount", "date"]
+    },
+    "ExpenseV2": {
+      "title": "Expense V2",
+      "description": "Financial expense record V2",
+      "type": "object",
+      "properties": {
+        "expense_id": { "type": "string" },
+        "category": { "type": "string" },
+        "amount": { "type": "number" },
+        "date": { "type": "string", "format": "date-time" },
+        "payment_method": { "type": "string" },
+        "description": { "type": "string" },
+        "receipt_url": { "type": "string" },
+        "station_id": { "type": "string" }
+      },
+      "required": ["expense_id", "amount", "date"]
+    },
+    "StockReduction": {
+      "title": "Stock Reduction",
+      "description": "Record of manual stock reduction",
+      "type": "object",
+      "properties": {
+        "station_id": { "type": "string" },
+        "fuel_type": { "type": "string" },
+        "amount": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "manager_id": { "type": "string" }
+      },
+      "required": ["station_id", "fuel_type", "amount", "timestamp", "manager_id"]
     }
   },
   "firestore": {
@@ -140,9 +301,45 @@
       "schema": "FuelDistribution",
       "description": "Fuel distributions collection"
     },
+    "/stock_reductions/{reductionId}": {
+      "schema": "StockReduction",
+      "description": "Stock reductions collection"
+    },
     "/audit_logs/{logId}": {
       "schema": "AuditLog",
       "description": "Audit logs collection"
+    },
+    "/chat_messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "Chat messages collection"
+    },
+    "/complaints/{complaintId}": {
+      "schema": "Complaint",
+      "description": "Complaints collection"
+    },
+    "/invoices/{invoiceId}": {
+      "schema": "Invoice",
+      "description": "Invoices collection"
+    },
+    "/invoices_v2/{invoiceId}": {
+      "schema": "InvoiceV2",
+      "description": "Invoices collection V2"
+    },
+    "/income/{incomeId}": {
+      "schema": "Income",
+      "description": "Income collection"
+    },
+    "/income_v2/{incomeId}": {
+      "schema": "IncomeV2",
+      "description": "Income collection V2"
+    },
+    "/expenses/{expenseId}": {
+      "schema": "Expense",
+      "description": "Expenses collection"
+    },
+    "/expenses_v2/{expenseId}": {
+      "schema": "ExpenseV2",
+      "description": "Expenses collection V2"
     }
   }
 }

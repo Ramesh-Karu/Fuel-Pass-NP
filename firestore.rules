@@ -1,47 +1,109 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Allow public read/write for users to enable username/password login
-    // WARNING: This is insecure and should be hardened for production
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() &&
+        (request.auth.token.email == "rameshnathankaruvoolan10@gmail.com");
+    }
+    
+    // Users collection
     match /users/{userId} {
       allow read, write: if true;
     }
     
+    // Stations collection
     match /stations/{stationId} {
-      allow read: if true;
-      allow write: if true;
+      allow read, write: if true;
     }
     
+    // Vehicles collection
     match /vehicles/{vehicleId} {
       allow read, write: if true;
     }
     
+    // Distributions collection
     match /distributions/{distributionId} {
       allow read, write: if true;
     }
     
+    // Transactions collection
     match /transactions/{transactionId} {
       allow read, write: if true;
     }
     
-    match /station_reports/{reportId} {
-      allow read, write: if true;
-    }
-    
+    // Audit logs
     match /audit_logs/{logId} {
       allow read, write: if true;
     }
     
+    // Vehicle type limits
     match /vehicle_type_limits/{limitId} {
       allow read, write: if true;
     }
     
+    // Pre-authorized users
     match /pre_authorized_users/{email} {
       allow read, write: if true;
     }
     
-    match /test/{docId} {
-      allow read: if true;
+    // Chat messages
+    match /chat_messages/{messageId} {
+      allow read, write: if true;
+    }
+    
+    // Complaints
+    match /complaints/{complaintId} {
+      allow read, write: if true;
+    }
+
+    // System Config
+    match /system_config/{docId} {
+      allow read, write: if true;
+    }
+    
+    // Invoices collection
+    match /invoices/{invoiceId} {
+      allow read, write: if true;
+    }
+    
+    // Invoices V2 collection
+    match /invoices_v2/{invoiceId} {
+      allow read, write: if true;
+    }
+    
+    // Income collection
+    match /income/{incomeId} {
+      allow read, write: if true;
+    }
+    
+    // Income V2 collection
+    match /income_v2/{incomeId} {
+      allow read, write: if true;
+    }
+    
+    // Expenses collection
+    match /expenses/{expenseId} {
+      allow read, write: if true;
+    }
+    
+    // Expenses V2 collection
+    match /expenses_v2/{expenseId} {
+      allow read, write: if true;
+    }
+    
+    // Stock reductions collection
+    match /stock_reductions/{reductionId} {
+      allow read, write: if true;
+    }
+    
+    // Fuel consumption logs
+    match /fuel_consumption_logs/{logId} {
+      allow read, write: if true;
     }
   }
 }

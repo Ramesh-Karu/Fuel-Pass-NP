@@ -23,8 +23,14 @@ import {
   Camera,
   ChevronRight,
   BarChart3,
-  Droplets
+  Droplets,
+  MessageCircle,
+  MessageSquare,
+  Filter,
+  Fingerprint,
+  Key
 } from 'lucide-react';
+import { startRegistration, startAuthentication } from '@simplewebauthn/browser';
 import { motion, AnimatePresence } from 'motion/react';
 import { QRCodeCanvas } from 'qrcode.react';
 import { Html5QrcodeScanner } from 'html5-qrcode';
@@ -54,7 +60,8 @@ import {
   Timestamp,
   increment,
   runTransaction,
-  serverTimestamp
+  serverTimestamp,
+  arrayUnion
 } from 'firebase/firestore';
 import { 
   signInWithPopup,
@@ -65,8 +72,23 @@ import {
   createUserWithEmailAndPassword
 } from 'firebase/auth';
 import { db, auth, secondaryAuth } from './firebase';
-import { User, Role, Vehicle, FuelStation, FuelTransaction, VehicleType, AuditLog, VehicleTypeLimit, FuelDistribution } from './types';
+import { User, Role, Vehicle, FuelStation, FuelTransaction, VehicleType, AuditLog, VehicleTypeLimit, FuelDistribution, Complaint, ComplaintStatus, ComplaintComment, Invoice, Income, Expense, FuelPrice } from './types';
 import TrafficBar from './components/TrafficBar';
+import { Chatbot } from './components/Chatbot';
+import { AdminLiveChat } from './components/AdminLiveChat';
+import { LiveMap } from './components/LiveMap';
+import { ComplaintFormModal } from './components/ComplaintFormModal';
+import { TrackComplaintView } from './components/TrackComplaintView';
+import { MyComplaintsView } from './components/MyComplaintsView';
+import { AdminComplaintsView } from './components/AdminComplaintsView';
+import { LanguageProvider, T } from './contexts/LanguageContext';
+import { LanguageSelector } from './components/LanguageSelector';
+import { FinancialDashboard } from './components/FinancialDashboard';
+import { FuelPriceDisplay } from './components/FuelPriceDisplay';
+import { FuelPriceManager } from './components/FuelPriceManager';
+import { StockReductionForm } from './components/StockReductionForm';
+import { StylishInvoiceCard } from './components/StylishInvoiceCard';
+import { isNfcSupported, readNfcTag, writeNfcTag } from './utils/nfc';
 
 // --- Firebase Error Handling ---
 enum OperationType {
@@ -173,7 +195,7 @@ const getErrorMessage = (err: any) => {
   }
 };
 
-const api = {
+export const api = {
   createSystemUser: async (data: any) => {
     try {
       // Generate a unique ID for the user since we aren't using Firebase Auth for these users
@@ -402,6 +424,41 @@ const api = {
       return [];
     }
   },
+  getDistributorSummary: async () => {
+    try {
+      const stations = await api.getStations();
+      const totalPetrol92 = stations.reduce((sum, s) => sum + (s.balance_petrol_92 || 0), 0);
+      const totalPetrol95 = stations.reduce((sum, s) => sum + (s.balance_petrol_95 || 0), 0);
+      const totalDiesel = stations.reduce((sum, s) => sum + (s.balance_diesel || 0), 0);
+      const totalSuperDiesel = stations.reduce((sum, s) => sum + (s.balance_super_diesel || 0), 0);
+      
+      return {
+        totalPetrol92,
+        totalPetrol95,
+        totalDiesel,
+        totalSuperDiesel,
+        stationCount: stations.length
+      };
+    } catch (error) {
+      console.error(error);
+      return null;
+    }
+  },
+  getStationDistributions: async (filters: any): Promise<FuelDistribution[]> => {
+    try {
+      let qry = query(collection(db, 'distributions'), orderBy('timestamp', 'desc'));
+      const snapshot = await getDocs(qry);
+      let data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as FuelDistribution));
+      
+      if (filters.station_id) data = data.filter(d => d.station_id === filters.station_id);
+      if (filters.fuel_type) data = data.filter(d => d.fuel_type === filters.fuel_type);
+      
+      return data;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, 'distributions');
+      return [];
+    }
+  },
   getVehicles: async (): Promise<Vehicle[]> => {
     try {
       const snapshot = await getDocs(collection(db, 'vehicles'));
@@ -554,15 +611,6 @@ const api = {
       return [];
     }
   },
-  getStationDistributions: async (filters?: any): Promise<FuelDistribution[]> => {
-    try {
-      const snapshot = await getDocs(query(collection(db, 'distributions'), orderBy('timestamp', 'desc')));
-      return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as FuelDistribution));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.LIST, 'distributions');
-      return [];
-    }
-  },
   getAnalytics: async (): Promise<any> => {
     try {
       const transactions = await api.getDetailedTransactions();
@@ -612,15 +660,311 @@ const api = {
       return { todayFuel: 0, fuelPerStation: [], peakHours: [], trends: [], fuelByType: [] };
     }
   },
+  createComplaint: async (data: any): Promise<Complaint> => {
+    try {
+      const complaintRef = doc(collection(db, 'complaints'));
+      const complaintId = `CMP-${Math.floor(10000 + Math.random() * 90000)}`;
+      
+      const complaint: Complaint = {
+        id: complaintRef.id,
+        complaint_id: complaintId,
+        ...data,
+        status: 'Submitted',
+        timestamp: new Date().toISOString(),
+        comments: []
+      };
+      
+      await setDoc(complaintRef, complaint);
+      return complaint;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'complaints');
+      throw error;
+    }
+  },
+  getComplaintByTracking: async (complaintId: string, phoneOrNic: string): Promise<Complaint | null> => {
+    try {
+      // First try to find by complaint_id
+      const q = query(
+        collection(db, 'complaints'), 
+        where('complaint_id', '==', complaintId.toUpperCase())
+      );
+      const snapshot = await getDocs(q);
+      
+      if (snapshot.empty) return null;
+      
+      const complaint = { id: snapshot.docs[0].id, ...snapshot.docs[0].data() } as Complaint;
+      
+      // Verify phone or NIC matches
+      if (
+        complaint.email_phone.includes(phoneOrNic) || 
+        complaint.nic.toLowerCase() === phoneOrNic.toLowerCase()
+      ) {
+        return complaint;
+      }
+      
+      return null;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, 'complaints');
+      throw error;
+    }
+  },
+  getMyComplaints: async (userId: string): Promise<Complaint[]> => {
+    try {
+      const q = query(
+        collection(db, 'complaints'), 
+        where('user_id', '==', userId),
+        orderBy('timestamp', 'desc')
+      );
+      const snapshot = await getDocs(q);
+      return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Complaint));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, 'complaints');
+      return [];
+    }
+  },
+  getAllComplaints: async (): Promise<Complaint[]> => {
+    try {
+      const q = query(collection(db, 'complaints'), orderBy('timestamp', 'desc'));
+      const snapshot = await getDocs(q);
+      return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Complaint));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, 'complaints');
+      return [];
+    }
+  },
+  updateComplaintStatus: async (complaintId: string, status: ComplaintStatus, comment?: string, userId?: string) => {
+    try {
+      const complaintRef = doc(db, 'complaints', complaintId);
+      const updateData: any = { status };
+      
+      if (comment && userId) {
+        const newComment: ComplaintComment = {
+          user_id: userId,
+          role: 'admin',
+          text: comment,
+          timestamp: new Date().toISOString()
+        };
+        updateData.comments = arrayUnion(newComment);
+      }
+      
+      await updateDoc(complaintRef, updateData);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, 'complaints');
+      throw error;
+    }
+  },
+  addComplaintComment: async (complaintId: string, text: string, userId: string, role: 'user' | 'admin') => {
+    try {
+      const complaintRef = doc(db, 'complaints', complaintId);
+      const newComment: ComplaintComment = {
+        user_id: userId,
+        role,
+        text,
+        timestamp: new Date().toISOString()
+      };
+      await updateDoc(complaintRef, {
+        comments: arrayUnion(newComment)
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, 'complaints');
+      throw error;
+    }
+  },
+  getInvoices: async (stationId?: string): Promise<Invoice[]> => {
+    try {
+      let qry = query(collection(db, 'invoices'), orderBy('date', 'desc'));
+      if (stationId) qry = query(qry, where('station_id', '==', stationId));
+      const snapshot = await getDocs(qry);
+      return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Invoice));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, 'invoices');
+      return [];
+    }
+  },
+  reduceStock: async (data: any) => {
+    try {
+      return await runTransaction(db, async (transaction) => {
+        const stationRef = doc(db, 'stations', data.station_id);
+        const stationDoc = await transaction.get(stationRef);
+        if (!stationDoc.exists()) throw new Error('Station not found');
+        
+        const fuelTypeKey = data.fuel_type.toLowerCase().replace(' ', '_');
+        const balanceField = `balance_${fuelTypeKey}`;
+        const currentBalance = stationDoc.data()[balanceField] || 0;
+        
+        if (currentBalance < data.amount) {
+          throw new Error('Insufficient fuel balance at station');
+        }
+        
+        const reductionRef = doc(collection(db, 'stock_reductions'));
+        transaction.set(reductionRef, {
+          ...data,
+          timestamp: data.timestamp || new Date().toISOString()
+        });
+        
+        transaction.update(stationRef, {
+          [balanceField]: increment(-data.amount)
+        });
+        
+        return { id: reductionRef.id };
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'stock_reductions');
+      throw error;
+    }
+  },
+  createInvoice: async (data: any) => {
+    try {
+      const ref = doc(collection(db, 'invoices'));
+      await setDoc(ref, { ...data, invoice_id: `INV-${Math.floor(10000 + Math.random() * 90000)}`, date: new Date().toISOString() });
+      return { id: ref.id };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'invoices');
+      throw error;
+    }
+  },
+  getIncome: async (stationId?: string): Promise<Income[]> => {
+    try {
+      let qry = query(collection(db, 'income'), orderBy('date', 'desc'));
+      if (stationId) qry = query(qry, where('station_id', '==', stationId));
+      const snapshot = await getDocs(qry);
+      return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Income));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, 'income');
+      return [];
+    }
+  },
+  createIncome: async (data: any) => {
+    try {
+      const ref = doc(collection(db, 'income'));
+      await setDoc(ref, { ...data, income_id: `INC-${Math.floor(10000 + Math.random() * 90000)}`, date: new Date().toISOString() });
+      return { id: ref.id };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'income');
+      throw error;
+    }
+  },
+  getExpenses: async (stationId?: string): Promise<Expense[]> => {
+    try {
+      let qry = query(collection(db, 'expenses'), orderBy('date', 'desc'));
+      if (stationId) qry = query(qry, where('station_id', '==', stationId));
+      const snapshot = await getDocs(qry);
+      return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Expense));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, 'expenses');
+      return [];
+    }
+  },
+  createExpense: async (data: any) => {
+    try {
+      const ref = doc(collection(db, 'expenses'));
+      await setDoc(ref, { ...data, expense_id: `EXP-${Math.floor(10000 + Math.random() * 90000)}`, date: new Date().toISOString() });
+      return { id: ref.id };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'expenses');
+      throw error;
+    }
+  },
+  getGlobalStock: async () => {
+    try {
+      const docRef = doc(db, 'system_config', 'global_fuel_stock');
+      const docSnap = await getDoc(docRef);
+      if (docSnap.exists()) {
+        return docSnap.data();
+      }
+      return { petrol_92: 0, petrol_95: 0, diesel: 0, super_diesel: 0 };
+    } catch (error) {
+      console.error(error);
+      return { petrol_92: 0, petrol_95: 0, diesel: 0, super_diesel: 0 };
+    }
+  },
+  getFuelPrices: async (): Promise<FuelPrice> => {
+    try {
+      const docRef = doc(db, 'system_config', 'fuel_prices');
+      const docSnap = await getDoc(docRef);
+      if (docSnap.exists()) {
+        return docSnap.data() as FuelPrice;
+      }
+      return { petrol_92: 0, petrol_95: 0, diesel: 0, super_diesel: 0, last_updated: new Date().toISOString() };
+    } catch (error) {
+      console.error(error);
+      return { petrol_92: 0, petrol_95: 0, diesel: 0, super_diesel: 0, last_updated: new Date().toISOString() };
+    }
+  },
+  updateFuelPrices: async (prices: FuelPrice) => {
+    try {
+      const docRef = doc(db, 'system_config', 'fuel_prices');
+      await setDoc(docRef, { ...prices, last_updated: new Date().toISOString() }, { merge: true });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'system_config/fuel_prices');
+      throw error;
+    }
+  },
+  updateGlobalStock: async (fuelType: string, amount: number) => {
+    try {
+      const docRef = doc(db, 'system_config', 'global_fuel_stock');
+      const fuelTypeKey = fuelType.toLowerCase().replace(' ', '_');
+      await setDoc(docRef, {
+        [fuelTypeKey]: increment(amount),
+        last_updated: serverTimestamp()
+      }, { merge: true });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'system_config/global_fuel_stock');
+      throw error;
+    }
+  },
+  updateStationFuelConsumption: async (stationId: string, consumption: { petrol_92: number, petrol_95: number, diesel: number, super_diesel: number }) => {
+    try {
+      return await runTransaction(db, async (transaction) => {
+        const stationRef = doc(db, 'stations', stationId);
+        const stationDoc = await transaction.get(stationRef);
+        if (!stationDoc.exists()) throw new Error('Station not found');
+        
+        const data = stationDoc.data();
+        const updates: any = {};
+        
+        if (consumption.petrol_92) updates.balance_petrol_92 = (data.balance_petrol_92 || 0) - consumption.petrol_92;
+        if (consumption.petrol_95) updates.balance_petrol_95 = (data.balance_petrol_95 || 0) - consumption.petrol_95;
+        if (consumption.diesel) updates.balance_diesel = (data.balance_diesel || 0) - consumption.diesel;
+        if (consumption.super_diesel) updates.balance_super_diesel = (data.balance_super_diesel || 0) - consumption.super_diesel;
+        
+        transaction.update(stationRef, updates);
+        
+        const logRef = doc(collection(db, 'fuel_consumption_logs'));
+        transaction.set(logRef, {
+          station_id: stationId,
+          station_name: data.name,
+          consumption,
+          timestamp: new Date().toISOString()
+        });
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'stations');
+      throw error;
+    }
+  },
   addStationFuel: async (stationId: string, amount: number, fuelType: string) => {
     try {
       return await runTransaction(db, async (transaction) => {
         const stationRef = doc(db, 'stations', stationId);
+        const globalStockRef = doc(db, 'system_config', 'global_fuel_stock');
+        
+        const globalStockSnap = await transaction.get(globalStockRef);
         const fuelTypeKey = fuelType.toLowerCase().replace(' ', '_');
+        const currentGlobalStock = globalStockSnap.exists() ? (globalStockSnap.data()[fuelTypeKey] || 0) : 0;
+        
+        if (currentGlobalStock < amount) {
+          throw new Error('Insufficient global stock to distribute');
+        }
+
         const balanceField = `balance_${fuelTypeKey}`;
         
         transaction.update(stationRef, {
           [balanceField]: increment(amount)
+        });
+        
+        transaction.update(globalStockRef, {
+          [fuelTypeKey]: increment(-amount)
         });
         
         const distRef = doc(collection(db, 'distributions'));
@@ -635,6 +979,31 @@ const api = {
       });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, `stations/${stationId}/add-fuel`);
+      throw error;
+    }
+  },
+  manualAddStationFuel: async (stationId: string, amount: number, fuelType: string) => {
+    try {
+      const stationRef = doc(db, 'stations', stationId);
+      const fuelTypeKey = fuelType.toLowerCase().replace(' ', '_');
+      const balanceField = `balance_${fuelTypeKey}`;
+      
+      await updateDoc(stationRef, {
+        [balanceField]: increment(amount)
+      });
+      
+      const distRef = doc(collection(db, 'distributions'));
+      await setDoc(distRef, {
+        station_id: stationId,
+        fuel_type: fuelType,
+        amount: amount,
+        timestamp: new Date().toISOString(),
+        is_manual: true
+      });
+      
+      return { id: distRef.id };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `stations/${stationId}/manual-add-fuel`);
       throw error;
     }
   },
@@ -754,7 +1123,7 @@ const api = {
   },
   updateUser: async (userId: string, data: any) => {
     try {
-      await updateDoc(doc(db, 'users', userId), data);
+      await setDoc(doc(db, 'users', userId), data, { merge: true });
       return { id: userId };
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `users/${userId}`);
@@ -926,7 +1295,7 @@ function RegisterView({ onBack, onSuccess }: { onBack: () => void, onSuccess: ()
             </div>
 
             <div className="space-y-2">
-              <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Phone Number</label>
+              <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4"><T>Phone Number</T></label>
               <div className="relative">
                 <Phone className="absolute left-6 top-1/2 -translate-y-1/2 w-5 h-5 opacity-20" />
                 <input 
@@ -939,7 +1308,7 @@ function RegisterView({ onBack, onSuccess }: { onBack: () => void, onSuccess: ()
             </div>
 
             <div className="space-y-2 md:col-span-2">
-              <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Address</label>
+              <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4"><T>Address</T></label>
               <div className="relative">
                 <Home className="absolute left-6 top-1/2 -translate-y-1/2 w-5 h-5 opacity-20" />
                 <textarea 
@@ -952,11 +1321,11 @@ function RegisterView({ onBack, onSuccess }: { onBack: () => void, onSuccess: ()
             </div>
 
             <div className="md:col-span-2 border-t border-[#141414]/5 pt-6 mt-2">
-              <h3 className="text-lg font-bold mb-4">Vehicle Details</h3>
+              <h3 className="text-lg font-bold mb-4"><T>Vehicle Details</T></h3>
             </div>
 
             <div className="space-y-2">
-              <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Vehicle Prefix (e.g. WP AAA)</label>
+              <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4"><T>Vehicle Prefix (e.g. WP AAA)</T></label>
               <input 
                 type="text" required
                 className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none"
@@ -966,7 +1335,7 @@ function RegisterView({ onBack, onSuccess }: { onBack: () => void, onSuccess: ()
             </div>
 
             <div className="space-y-2">
-              <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Vehicle Number (e.g. 9346)</label>
+              <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4"><T>Vehicle Number (e.g. 9346)</T></label>
               <input 
                 type="text" required
                 className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none"
@@ -993,14 +1362,14 @@ function RegisterView({ onBack, onSuccess }: { onBack: () => void, onSuccess: ()
                 className="w-full py-5 bg-[#141414] text-white rounded-2xl font-bold text-lg hover:bg-opacity-90 transition-all disabled:opacity-50 flex items-center justify-center gap-3"
               >
                 <UserIcon className="w-5 h-5" />
-                {loading ? 'Registering...' : 'Register with Email'}
+                {loading ? <T>Registering...</T> : <T>Register with Email</T>}
               </button>
               
               <div className="relative flex items-center justify-center">
                 <div className="absolute inset-0 flex items-center">
                   <div className="w-full border-t border-[#141414]/10"></div>
                 </div>
-                <div className="relative bg-white px-4 text-sm text-[#141414]/40 font-bold uppercase tracking-widest">Or</div>
+                <div className="relative bg-white px-4 text-sm text-[#141414]/40 font-bold uppercase tracking-widest"><T>Or</T></div>
               </div>
 
               <button 
@@ -1015,7 +1384,7 @@ function RegisterView({ onBack, onSuccess }: { onBack: () => void, onSuccess: ()
                   <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" />
                   <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
                 </svg>
-                Sign up with Google
+                <T>Sign up with Google</T>
               </button>
             </div>
           </form>
@@ -1167,7 +1536,7 @@ function CompleteProfileView({ user, onSuccess, onCancel }: { user: any, onSucce
   );
 }
 
-function PublicDashboard({ user }: { user: User }) {
+function PublicDashboard({ user, onViewComplaints }: { user: User, onViewComplaints: () => void }) {
   const [vehicle, setVehicle] = useState<Vehicle | null>(user.vehicle || null);
   const [history, setHistory] = useState<FuelTransaction[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1193,16 +1562,106 @@ function PublicDashboard({ user }: { user: User }) {
 
   if (loading) return <div className="flex justify-center py-20"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#141414]"></div></div>;
 
+  const NfcButtons = () => isNfcSupported() && vehicle && (
+    <div className="mt-6">
+      <button 
+        onClick={async () => {
+          try {
+            const data = `${vehicle.id_prefix}-${vehicle.id_number}`;
+            await writeNfcTag(data);
+            alert('NFC Tag written successfully!');
+          } catch (err: any) {
+            alert(err.message);
+          }
+        }}
+        className="w-full px-6 py-4 bg-blue-600 text-white rounded-2xl font-bold hover:bg-opacity-90"
+      >
+        <T>Emit NFC (Android Only)</T>
+      </button>
+    </div>
+  );
+
   if (!vehicle) return (
     <div className="text-center py-20 space-y-4">
       <AlertCircle className="w-16 h-16 mx-auto opacity-20" />
-      <h2 className="text-2xl font-bold">No Vehicle Found</h2>
-      <p className="opacity-50">Please contact administrator to link a vehicle to your account.</p>
+      <h2 className="text-2xl font-bold"><T>No Vehicle Found</T></h2>
+      <p className="opacity-50"><T>Please contact administrator to link a vehicle to your account.</T></p>
+      <NfcButtons />
     </div>
   );
 
   const totalConsumed = history.reduce((sum, t) => sum + t.amount, 0);
   const remaining = Math.max(0, vehicle.fuel_limit - totalConsumed);
+
+  const downloadFuelPassPDF = () => {
+    if (!vehicle) return;
+    
+    const canvas = document.querySelector('canvas');
+    if (!canvas) {
+      alert('QR Code not ready. Please try again.');
+      return;
+    }
+    
+    const qrDataUrl = canvas.toDataURL('image/png');
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4'
+    });
+
+    // Modern Card Design in PDF
+    const cardWidth = 100;
+    const cardHeight = 150;
+    const x = (210 - cardWidth) / 2;
+    const y = 30;
+
+    // Card Background
+    doc.setFillColor(20, 20, 20);
+    doc.roundedRect(x, y, cardWidth, cardHeight, 10, 10, 'F');
+
+    // Header
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(16);
+    doc.setFont('helvetica', 'bold');
+    doc.text('NP FUEL PASS', x + cardWidth / 2, y + 15, { align: 'center' });
+
+    // QR Code Container
+    doc.setFillColor(255, 255, 255);
+    doc.roundedRect(x + 15, y + 25, 70, 70, 5, 5, 'F');
+    doc.addImage(qrDataUrl, 'PNG', x + 20, y + 30, 60, 60);
+
+    // Vehicle Info
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text('VEHICLE NUMBER', x + 15, y + 105);
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`${vehicle.id_prefix} ${vehicle.id_number}`, x + 15, y + 112);
+
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text('VEHICLE TYPE', x + 15, y + 122);
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.text(vehicle.type, x + 15, y + 129);
+
+    // User Info
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text('OWNER', x + 15, y + 139);
+    doc.setFontSize(12);
+    doc.setFont('helvetica', 'bold');
+    doc.text(user.full_name, x + 15, y + 145);
+
+    // Footer
+    doc.setFontSize(8);
+    doc.setTextColor(150, 150, 150);
+    doc.text('OFFICIAL FUEL PASS CARD', x + cardWidth / 2, y + cardHeight - 8, { align: 'center' });
+    doc.text('www.npfuelpass.lk', x + cardWidth / 2, y + cardHeight - 4, { align: 'center' });
+
+    doc.save(`FuelPass_${vehicle.id_prefix}_${vehicle.id_number}.pdf`);
+  };
 
   return (
     <div className="space-y-8">
@@ -1211,42 +1670,44 @@ function PublicDashboard({ user }: { user: User }) {
           <div className="bg-white/70 backdrop-blur-xl p-10 rounded-[2.5rem] border border-white/40 shadow-xl shadow-black/5">
             <div className="flex justify-between items-start mb-10">
               <div>
-                <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-2">Vehicle Details</p>
+                <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-2"><T>Vehicle Details</T></p>
                 <h2 className="text-4xl font-bold tracking-tight">{vehicle.id_prefix} {vehicle.id_number}</h2>
                 <p className="text-lg opacity-60 mt-2">{vehicle.type}</p>
               </div>
               <div className="bg-[#141414] text-white px-6 py-3 rounded-2xl">
-                <p className="text-[10px] uppercase tracking-widest font-bold opacity-50 mb-1">Weekly Quota</p>
+                <p className="text-[10px] uppercase tracking-widest font-bold opacity-50 mb-1"><T>Weekly Quota</T></p>
                 <p className="text-2xl font-bold">{vehicle.fuel_limit}L</p>
               </div>
             </div>
 
             <div className="grid grid-cols-2 gap-6">
               <div className="bg-white/40 p-8 rounded-3xl">
-                <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-2">Remaining</p>
+                <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-2"><T>Remaining</T></p>
                 <p className="text-4xl font-bold text-green-600">{remaining.toFixed(1)}L</p>
               </div>
               <div className="bg-white/40 p-8 rounded-3xl">
-                <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-2">Consumed</p>
+                <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-2"><T>Consumed</T></p>
                 <p className="text-4xl font-bold">{totalConsumed.toFixed(1)}L</p>
               </div>
             </div>
+            
+            <NfcButtons />
           </div>
 
           <div className="bg-white/70 backdrop-blur-xl rounded-[2.5rem] border border-white/40 shadow-xl shadow-black/5 overflow-hidden">
             <div className="p-8 border-b border-[#141414]/5 flex justify-between items-center">
               <h3 className="text-xl font-bold flex items-center gap-3">
                 <History className="w-5 h-5 opacity-30" />
-                Recent Transactions
+                <T>Recent Transactions</T>
               </h3>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left">
                 <thead>
                   <tr className="bg-[#F5F5F0]/50 text-[10px] uppercase tracking-widest font-bold opacity-50">
-                    <th className="px-8 py-4">Date & Time</th>
-                    <th className="px-8 py-4">Station</th>
-                    <th className="px-8 py-4 text-right">Amount</th>
+                    <th className="px-8 py-4"><T>Date & Time</T></th>
+                    <th className="px-8 py-4"><T>Station</T></th>
+                    <th className="px-8 py-4 text-right"><T>Amount</T></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#141414]/5">
@@ -1259,7 +1720,7 @@ function PublicDashboard({ user }: { user: User }) {
                   ))}
                   {history.length === 0 && (
                     <tr>
-                      <td colSpan={3} className="px-8 py-12 text-center opacity-30 italic">No transactions found</td>
+                      <td colSpan={3} className="px-8 py-12 text-center opacity-30 italic"><T>No transactions found</T></td>
                     </tr>
                   )}
                 </tbody>
@@ -1270,7 +1731,7 @@ function PublicDashboard({ user }: { user: User }) {
 
         <div className="space-y-8">
           <div className="bg-white/70 backdrop-blur-xl p-10 rounded-[2.5rem] border border-white/40 shadow-xl shadow-black/5 text-center">
-            <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-6">Your Fuel Pass QR</p>
+            <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-6"><T>Your Fuel Pass QR</T></p>
             <div className="bg-white/50 p-8 rounded-3xl inline-block mb-6">
               <QRCodeCanvas 
                 value={JSON.stringify({ vehicleId: vehicle.id, prefix: vehicle.id_prefix, number: vehicle.id_number })} 
@@ -1280,12 +1741,21 @@ function PublicDashboard({ user }: { user: User }) {
               />
             </div>
             <p className="text-sm opacity-60 mb-6">Present this QR code at any fuel station to pump fuel.</p>
-            <button 
-              className="w-full py-4 bg-[#141414] text-white rounded-2xl font-bold hover:bg-opacity-90 transition-all"
-              onClick={() => alert('Google Wallet integration is coming soon!')}
-            >
-              Add to Google Wallet
-            </button>
+            <div className="space-y-3">
+              <button 
+                className="w-full py-4 bg-[#141414] text-white rounded-2xl font-bold hover:bg-opacity-90 transition-all flex items-center justify-center gap-2"
+                onClick={downloadFuelPassPDF}
+              >
+                <FileText className="w-5 h-5" />
+                Download PDF Card
+              </button>
+              <button 
+                className="w-full py-4 bg-white text-[#141414] border border-[#141414]/10 rounded-2xl font-bold hover:bg-[#F5F5F0] transition-all"
+                onClick={() => alert('Google Wallet integration is coming soon!')}
+              >
+                Add to Google Wallet
+              </button>
+            </div>
           </div>
 
           <div className="bg-[#141414] text-white p-10 rounded-[2.5rem] shadow-xl">
@@ -1319,8 +1789,41 @@ function PublicDashboard({ user }: { user: User }) {
                 </div>
               </div>
             </div>
+
+            <div className="pt-8 mt-8 border-t border-white/10">
+              <button 
+                onClick={onViewComplaints}
+                className="w-full py-4 bg-white text-[#141414] rounded-2xl font-bold hover:bg-opacity-90 transition-all flex items-center justify-center gap-2"
+              >
+                <MessageSquare className="w-5 h-5" />
+                My Complaints
+              </button>
+            </div>
           </div>
         </div>
+      </div>
+
+      <div className="space-y-8 mt-12">
+        <div className="flex items-center gap-4">
+          <div className="h-px flex-1 bg-[#141414]/5" />
+          <h3 className="text-sm font-bold uppercase tracking-[0.2em] opacity-30">Live Fuel Prices</h3>
+          <div className="h-px flex-1 bg-[#141414]/5" />
+        </div>
+        <FuelPriceDisplay />
+        
+        <div className="flex items-center gap-4">
+          <div className="h-px flex-1 bg-[#141414]/5" />
+          <h3 className="text-sm font-bold uppercase tracking-[0.2em] opacity-30">Live Station Map</h3>
+          <div className="h-px flex-1 bg-[#141414]/5" />
+        </div>
+        <LiveMap />
+
+        <div className="flex items-center gap-4">
+          <div className="h-px flex-1 bg-[#141414]/5" />
+          <h3 className="text-sm font-bold uppercase tracking-[0.2em] opacity-30">Station Fuel Availability</h3>
+          <div className="h-px flex-1 bg-[#141414]/5" />
+        </div>
+        <PublicStationBalances />
       </div>
     </div>
   );
@@ -1421,9 +1924,11 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boole
 
 export default function AppWrapper() {
   return (
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
+    <LanguageProvider>
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    </LanguageProvider>
   );
 }
 
@@ -1442,7 +1947,7 @@ const useAsyncError = () => {
 function App() {
   const throwError = useAsyncError();
   const [user, setUser] = useState<User | null>(null);
-  const [view, setView] = useState<Role | 'login' | 'register' | 'complete-profile'>('public');
+  const [view, setView] = useState<Role | 'login' | 'register' | 'complete-profile' | 'track-complaint' | 'my-complaints'>('public');
   const [pendingGoogleUser, setPendingGoogleUser] = useState<any>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Vehicle[]>([]);
@@ -1453,6 +1958,7 @@ function App() {
   const [error, setError] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showProfileMenu, setShowProfileMenu] = useState(false);
 
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1462,6 +1968,7 @@ function App() {
       const loggedInUser = await api.loginWithEmail(email, password);
       setUser(loggedInUser);
       setView(loggedInUser.role);
+      localStorage.setItem('fuelpass_user', JSON.stringify(loggedInUser));
     } catch (err: any) {
       console.error("Login error:", err);
       setError(getErrorMessage(err) || 'Login failed. Please check your credentials.');
@@ -1470,31 +1977,30 @@ function App() {
     }
   };
 
-  useEffect(() => {
-    // Check for custom session first
-    const storedUser = localStorage.getItem('fuelpass_user');
-    if (storedUser) {
-      try {
-        const userData = JSON.parse(storedUser);
-        setUser(userData);
-        setView(userData.role);
-        setIsAuthReady(true);
-        return; // Skip Firebase auth check if local session exists
-      } catch (e) {
-        localStorage.removeItem('fuelpass_user');
-      }
-    }
+  const [isComplaintModalOpen, setIsComplaintModalOpen] = useState(false);
 
+  useEffect(() => {
+    const handleOpenComplaint = () => {
+      setIsComplaintModalOpen(true);
+    };
+    window.addEventListener('open-complaint-modal', handleOpenComplaint);
+    return () => window.removeEventListener('open-complaint-modal', handleOpenComplaint);
+  }, []);
+
+  useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      console.log("onAuthStateChanged: firebaseUser =", firebaseUser);
       if (firebaseUser) {
         try {
           const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+          console.log("onAuthStateChanged: userDoc exists =", userDoc.exists());
           if (userDoc.exists()) {
             const userData = { id: userDoc.id, ...userDoc.data() } as User;
+            console.log("onAuthStateChanged: userData =", userData);
             setUser(userData);
             setView(userData.role);
           } else {
-            // User authenticated but no profile found -> Needs to complete registration
+            console.log("onAuthStateChanged: User needs registration");
             setPendingGoogleUser(firebaseUser);
             setView('complete-profile');
           }
@@ -1507,11 +2013,9 @@ function App() {
           }
         }
       } else {
-        // Only clear user if no local session (handled at start of effect)
-        if (!localStorage.getItem('fuelpass_user')) {
-          setUser(null);
-          setView('public');
-        }
+        console.log("onAuthStateChanged: No user");
+        setUser(null);
+        setView('public');
       }
       setIsAuthReady(true);
     });
@@ -1547,6 +2051,75 @@ function App() {
       }
       console.error("Google login error:", err);
       setError(getErrorMessage(err));
+      setLoading(false);
+    }
+  };
+
+  const handleRegisterPasskey = async () => {
+    if (!user) return;
+    try {
+      const resp = await fetch(`/api/passkey/register-options?username=${user.username}`);
+      if (!resp.ok) {
+        const err = await resp.json();
+        throw new Error(err.error || 'Failed to get registration options');
+      }
+      const options = await resp.json();
+      
+      const attResp = await startRegistration(options);
+      
+      const verifyResp = await fetch('/api/passkey/register-verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(attResp),
+      });
+      
+      const verification = await verifyResp.json();
+      if (verification.verified) {
+        alert('Passkey registered successfully! You can now use it to log in.');
+      } else {
+        alert('Passkey registration failed.');
+      }
+    } catch (err: any) {
+      console.error(err);
+      alert('Error registering passkey: ' + err.message);
+    }
+  };
+
+  const handlePasskeyLogin = async () => {
+    if (!email) {
+      setError('Please enter your username/email first');
+      return;
+    }
+    setLoading(true);
+    setError('');
+    try {
+      const resp = await fetch(`/api/passkey/login-options?username=${email}`);
+      if (!resp.ok) {
+        const err = await resp.json();
+        throw new Error(err.error || 'User not found or no passkeys registered');
+      }
+      const options = await resp.json();
+      
+      const asseResp = await startAuthentication(options);
+      
+      const verifyResp = await fetch('/api/passkey/login-verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(asseResp),
+      });
+      
+      const verification = await verifyResp.json();
+      if (verification.verified && verification.user) {
+        setUser(verification.user);
+        setView(verification.user.role);
+        localStorage.setItem('fuelpass_user', JSON.stringify(verification.user));
+      } else {
+        setError('Passkey login failed.');
+      }
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || 'Passkey login failed');
+    } finally {
       setLoading(false);
     }
   };
@@ -1606,17 +2179,67 @@ function App() {
 
         <div className="flex items-center gap-6">
           {user ? (
-            <div className="flex items-center gap-4">
-              <div className="text-right hidden sm:block">
-                <p className="text-sm font-bold">{user.username}</p>
-                <p className="text-[10px] uppercase opacity-50 font-bold">{user.role} {user.station_name ? `• ${user.station_name}` : ''}</p>
-              </div>
+            <div className="relative">
               <button 
-                onClick={handleLogout}
-                className="p-2 hover:bg-red-50 text-red-600 rounded-full transition-colors"
+                onClick={() => setShowProfileMenu(!showProfileMenu)}
+                className="flex items-center gap-3 hover:bg-black/5 p-2 rounded-full transition-colors"
               >
-                <LogOut className="w-5 h-5" />
+                <div className="text-right hidden sm:block">
+                  <p className="text-sm font-bold">{user.username}</p>
+                  <p className="text-[10px] uppercase opacity-50 font-bold">{user.role}</p>
+                </div>
+                <div className="w-10 h-10 bg-[#141414] text-white rounded-full flex items-center justify-center">
+                  <UserIcon className="w-5 h-5" />
+                </div>
               </button>
+
+              <AnimatePresence>
+                {showProfileMenu && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                    className="absolute right-0 top-full mt-2 w-56 bg-white rounded-2xl shadow-xl border border-[#141414]/10 overflow-hidden z-50"
+                  >
+                    <div className="p-4 border-b border-[#141414]/5">
+                      <p className="font-bold text-sm truncate">{user.full_name || user.username}</p>
+                      <p className="text-xs opacity-50 truncate">{user.email}</p>
+                    </div>
+                    <div className="p-2">
+                      <button
+                        onClick={() => {
+                          setView(user.role);
+                          setShowProfileMenu(false);
+                        }}
+                        className="w-full text-left px-4 py-3 rounded-xl hover:bg-[#F5F5F0] text-sm font-bold flex items-center gap-2 transition-colors"
+                      >
+                        <UserIcon className="w-4 h-4 opacity-50" />
+                        Go to My Profile
+                      </button>
+                      <button
+                        onClick={() => {
+                          handleRegisterPasskey();
+                          setShowProfileMenu(false);
+                        }}
+                        className="w-full text-left px-4 py-3 rounded-xl hover:bg-[#F5F5F0] text-sm font-bold flex items-center gap-2 transition-colors"
+                      >
+                        <Fingerprint className="w-4 h-4 opacity-50 text-indigo-600" />
+                        Register Passkey
+                      </button>
+                      <button
+                        onClick={() => {
+                          handleLogout();
+                          setShowProfileMenu(false);
+                        }}
+                        className="w-full text-left px-4 py-3 rounded-xl hover:bg-red-50 text-red-600 text-sm font-bold flex items-center gap-2 transition-colors"
+                      >
+                        <LogOut className="w-4 h-4" />
+                        Log Out
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
           ) : (
             <button 
@@ -1641,66 +2264,133 @@ function App() {
               className="space-y-8"
             >
               {user?.role === 'public' ? (
-                <PublicDashboard user={user} />
+                <PublicDashboard user={user} onViewComplaints={() => setView('my-complaints')} />
               ) : (
-                <div className="space-y-16 py-12">
-                  <div className="text-center space-y-8">
-                    <div className="max-w-3xl mx-auto space-y-6">
-                      <h2 className="text-5xl font-bold tracking-tight">Fuel Pass Northern Province</h2>
+                <div className="space-y-16 py-12 relative">
+                  {/* Floating Background Elements */}
+                  <div className="absolute top-0 left-10 w-32 h-32 bg-blue-400/10 rounded-full blur-3xl floating" />
+                  <div className="absolute top-20 right-20 w-48 h-48 bg-purple-400/10 rounded-full blur-3xl floating-delayed" />
+                  <div className="absolute bottom-40 left-1/3 w-24 h-24 bg-green-400/10 rounded-full blur-3xl floating" />
+
+                  <div className="text-center space-y-8 relative z-10">
+                    <motion.div 
+                      initial={{ opacity: 0, y: 30 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.8, ease: "easeOut" }}
+                      className="max-w-3xl mx-auto space-y-6"
+                    >
+                      <h2 className="text-5xl font-bold tracking-tight"><T>Fuel Pass Northern Province</T></h2>
                       <p className="text-xl opacity-60 leading-relaxed">
-                        Securely manage your fuel quota, view transaction history, and get your unique QR code for seamless pumping at any station.
+                        <T>Securely manage your fuel quota, view transaction history, and get your unique QR code for seamless pumping at any station.</T>
                       </p>
-                    </div>
+                    </motion.div>
                     
-                    <div className="flex flex-col sm:flex-row gap-4 justify-center items-center pt-8">
+                    <motion.div 
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ delay: 0.3, duration: 0.5 }}
+                      className="flex flex-col sm:flex-row gap-4 justify-center items-center pt-8"
+                    >
                       <button 
                         onClick={() => setView('login')}
-                        className="px-10 py-5 bg-[#141414] text-white rounded-2xl font-bold text-lg hover:bg-opacity-90 transition-all shadow-xl shadow-[#141414]/20 flex items-center gap-3"
+                        className="px-10 py-5 bg-[#141414] text-white rounded-2xl font-bold text-lg hover:bg-opacity-90 transition-all shadow-xl shadow-[#141414]/20 flex items-center gap-3 relative overflow-hidden group"
                       >
-                        <Shield className="w-6 h-6" />
-                        Login to Dashboard
+                        <div className="absolute inset-0 rounded-2xl border-2 border-transparent group-hover:border-white/20 transition-colors" />
+                        <Shield className="w-6 h-6 relative z-10" />
+                        <span className="relative z-10"><T>Login to Dashboard</T></span>
                       </button>
                       <button 
                         onClick={() => setView('register' as any)}
-                        className="px-10 py-5 bg-white text-[#141414] border border-[#141414]/10 rounded-2xl font-bold text-lg hover:bg-[#F5F5F0] transition-all flex items-center gap-3"
+                        className="px-10 py-5 bg-white text-[#141414] border border-[#141414]/10 rounded-2xl font-bold text-lg hover:bg-[#F5F5F0] transition-all flex items-center gap-3 relative overflow-hidden"
                       >
-                        <Plus className="w-6 h-6" />
-                        Register New Vehicle
+                        <Plus className="w-6 h-6 relative z-10" />
+                        <span className="relative z-10"><T>Register New Vehicle</T></span>
                       </button>
-                    </div>
+                    </motion.div>
+                    <motion.div 
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      transition={{ delay: 0.6 }}
+                      className="flex justify-center mt-4 gap-4"
+                    >
+                      <button 
+                        onClick={() => setView('track-complaint')}
+                        className="px-6 py-3 bg-transparent text-[#141414] border border-[#141414]/20 rounded-xl font-bold text-sm hover:bg-[#141414]/5 transition-all flex items-center gap-2 hover:scale-105 active:scale-95"
+                      >
+                        <Search className="w-4 h-4" />
+                        <T>Track Complaint</T>
+                      </button>
+                      <button 
+                        onClick={() => setIsComplaintModalOpen(true)}
+                        className="px-6 py-3 bg-[#141414] text-white rounded-xl font-bold text-sm hover:bg-opacity-90 transition-all flex items-center gap-2 shadow-lg shadow-[#141414]/10 hover:scale-105 active:scale-95"
+                      >
+                        <AlertCircle className="w-4 h-4" />
+                        <T>Register Complaint</T>
+                      </button>
+                    </motion.div>
                   </div>
 
                   <div className="space-y-8">
                     <div className="flex items-center gap-4">
                       <div className="h-px flex-1 bg-[#141414]/5" />
-                      <h3 className="text-sm font-bold uppercase tracking-[0.2em] opacity-30">Station Fuel Availability</h3>
+                      <h3 className="text-sm font-bold uppercase tracking-[0.2em] opacity-30"><T>Live Fuel Prices</T></h3>
+                      <div className="h-px flex-1 bg-[#141414]/5" />
+                    </div>
+                    <FuelPriceDisplay />
+                  </div>
+
+                  <div className="space-y-8">
+                    <div className="flex items-center gap-4">
+                      <div className="h-px flex-1 bg-[#141414]/5" />
+                      <h3 className="text-sm font-bold uppercase tracking-[0.2em] opacity-30"><T>Live Station Map</T></h3>
+                      <div className="h-px flex-1 bg-[#141414]/5" />
+                    </div>
+                    <LiveMap />
+                  </div>
+
+                  <div className="space-y-8">
+                    <div className="flex items-center gap-4">
+                      <div className="h-px flex-1 bg-[#141414]/5" />
+                      <h3 className="text-sm font-bold uppercase tracking-[0.2em] opacity-30"><T>Station Fuel Availability</T></h3>
                       <div className="h-px flex-1 bg-[#141414]/5" />
                     </div>
                     <PublicStationBalances />
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-8 pt-8 max-w-5xl mx-auto">
-                    <div className="bg-white p-8 rounded-3xl border border-[#141414]/5 text-left space-y-4">
+                    <motion.div 
+                      whileHover={{ y: -10, scale: 1.02 }}
+                      transition={{ type: "spring", stiffness: 300 }}
+                      className="bg-white p-8 rounded-3xl border border-[#141414]/5 text-left space-y-4 shadow-sm hover:shadow-xl transition-shadow"
+                    >
                       <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center">
                         <QrCode className="w-6 h-6" />
                       </div>
                       <h3 className="font-bold text-lg">Unique QR Code</h3>
                       <p className="text-sm opacity-50">Get a unique QR code for your vehicle to speed up the pumping process.</p>
-                    </div>
-                    <div className="bg-white p-8 rounded-3xl border border-[#141414]/5 text-left space-y-4">
+                    </motion.div>
+                    <motion.div 
+                      whileHover={{ y: -10, scale: 1.02 }}
+                      transition={{ type: "spring", stiffness: 300 }}
+                      className="bg-white p-8 rounded-3xl border border-[#141414]/5 text-left space-y-4 shadow-sm hover:shadow-xl transition-shadow"
+                    >
                       <div className="w-12 h-12 bg-green-50 text-green-600 rounded-2xl flex items-center justify-center">
                         <BarChart3 className="w-6 h-6" />
                       </div>
                       <h3 className="font-bold text-lg">Real-time Quota</h3>
                       <p className="text-sm opacity-50">Track your weekly fuel consumption and remaining balance in real-time.</p>
-                    </div>
-                    <div className="bg-white p-8 rounded-3xl border border-[#141414]/5 text-left space-y-4">
+                    </motion.div>
+                    <motion.div 
+                      whileHover={{ y: -10, scale: 1.02 }}
+                      transition={{ type: "spring", stiffness: 300 }}
+                      className="bg-white p-8 rounded-3xl border border-[#141414]/5 text-left space-y-4 shadow-sm hover:shadow-xl transition-shadow"
+                    >
                       <div className="w-12 h-12 bg-purple-50 text-purple-600 rounded-2xl flex items-center justify-center">
                         <History className="w-6 h-6" />
                       </div>
                       <h3 className="font-bold text-lg">Detailed History</h3>
                       <p className="text-sm opacity-50">Access your full transaction history across all registered fuel stations.</p>
-                    </div>
+                    </motion.div>
                   </div>
                 </div>
               )}
@@ -1715,6 +2405,28 @@ function App() {
               exit={{ opacity: 0, x: -20 }}
             >
               <RegisterView onBack={() => setView('public')} onSuccess={() => setView('login')} />
+            </motion.div>
+          )}
+
+          {(view as any) === 'track-complaint' && (
+            <motion.div 
+              key="track-complaint"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+            >
+              <TrackComplaintView onBack={() => setView('public')} />
+            </motion.div>
+          )}
+
+          {(view as any) === 'my-complaints' && user && (
+            <motion.div 
+              key="my-complaints"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+            >
+              <MyComplaintsView user={user} onBack={() => setView(user.role)} />
             </motion.div>
           )}
 
@@ -1740,6 +2452,8 @@ function App() {
               />
             </motion.div>
           )}
+
+
 
           {view === 'login' && (
             <motion.div 
@@ -1768,7 +2482,7 @@ function App() {
 
                   <form onSubmit={(e) => { e.preventDefault(); handleLogin(); }} className="space-y-4">
                     <div className="space-y-2">
-                      <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Username or Email</label>
+                      <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4"><T>Username or Email</T></label>
                       <div className="relative">
                         <UserIcon className="absolute left-6 top-1/2 -translate-y-1/2 w-5 h-5 opacity-20" />
                         <input 
@@ -1781,7 +2495,7 @@ function App() {
                     </div>
 
                     <div className="space-y-2">
-                      <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Password</label>
+                      <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4"><T>Password</T></label>
                       <div className="relative">
                         <Shield className="absolute left-6 top-1/2 -translate-y-1/2 w-5 h-5 opacity-20" />
                         <input 
@@ -1803,7 +2517,7 @@ function App() {
                       ) : (
                         <>
                           <UserIcon className="w-5 h-5" />
-                          Sign in
+                          <T>Sign in</T>
                         </>
                       )}
                     </button>
@@ -1847,6 +2561,21 @@ function App() {
                       </>
                     )}
                   </button>
+
+                  <button 
+                    onClick={handlePasskeyLogin}
+                    disabled={loading}
+                    className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-bold tracking-tight hover:bg-indigo-700 active:scale-[0.98] transition-all flex items-center justify-center gap-3 disabled:opacity-50 shadow-lg shadow-indigo-200"
+                  >
+                    {loading ? (
+                      <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    ) : (
+                      <>
+                        <Fingerprint className="w-5 h-5" />
+                        Sign in with Passkey
+                      </>
+                    )}
+                  </button>
                 </div>
 
                 <div className="mt-8 pt-8 border-t border-[#141414]/5 text-center">
@@ -1864,9 +2593,31 @@ function App() {
 
           {view === 'agent' && user && <AgentDashboard user={user} />}
           {view === 'manager' && user && <ManagerDashboard user={user} />}
-          {view === 'admin' && user && <AdminDashboard user={user} />}
+          {(view === 'admin' || view === 'distributor' || view === 'support') && user && <AdminDashboard user={user} />}
         </AnimatePresence>
       </main>
+
+      <footer className="mt-auto py-8 text-center border-t border-[#141414]/5">
+        <p className="text-sm opacity-60 font-medium">
+          This is an open source project. 
+          <a 
+            href="https://github.com/rameshthecoder/np-fuel-pass" 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="ml-1 text-[#141414] font-bold hover:underline"
+          >
+            View on GitHub
+          </a>
+        </p>
+      </footer>
+
+      {view !== 'admin' && <Chatbot userId={user?.id} />}
+      
+      <ComplaintFormModal 
+        isOpen={isComplaintModalOpen} 
+        onClose={() => setIsComplaintModalOpen(false)}
+        user={user}
+      />
     </div>
   );
 }
@@ -1922,6 +2673,7 @@ function AgentDashboard({ user }: { user: User }) {
   const [transactions, setTransactions] = useState<FuelTransaction[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
+  const [invoiceData, setInvoiceData] = useState<any>(null);
   const [formData, setFormData] = useState({
     id_prefix: '',
     id_number: '',
@@ -2052,6 +2804,14 @@ function AgentDashboard({ user }: { user: User }) {
         amount: parseFloat(formData.amount)
       });
 
+      setInvoiceData({
+        date: new Date().toLocaleDateString(),
+        time: new Date().toLocaleTimeString(),
+        vehicleId: `${formData.id_prefix}-${formData.id_number}`,
+        amount: parseFloat(formData.amount),
+        remainingBalance: quotaInfo ? (quotaInfo.vehicle.fuel_limit - quotaInfo.consumed - parseFloat(formData.amount)) : 0
+      });
+
       setMsg({ text: 'Transaction recorded successfully!', type: 'success' });
       setFormData({ ...formData, amount: '', id_prefix: '', id_number: '', type: '' });
       setQuotaInfo(null);
@@ -2161,13 +2921,16 @@ function AgentDashboard({ user }: { user: User }) {
             >
               <div className="p-10">
                 <div className="flex justify-between items-center mb-8">
-                  <h3 className="text-2xl font-bold">New Pumping Entry</h3>
-                  <button onClick={() => setShowForm(false)} className="p-2 hover:bg-[#F5F5F0] rounded-full transition-colors">
+                  <h3 className="text-2xl font-bold">{invoiceData ? <T>Fuel Invoice</T> : <T>New Pumping Entry</T>}</h3>
+                  <button onClick={() => { setShowForm(false); setInvoiceData(null); }} className="p-2 hover:bg-[#F5F5F0] rounded-full transition-colors">
                     <XCircle className="w-6 h-6 opacity-30" />
                   </button>
                 </div>
 
-                <form onSubmit={handleSubmit} className="space-y-6">
+                {invoiceData ? (
+                  <StylishInvoiceCard {...invoiceData} />
+                ) : (
+                  <form onSubmit={handleSubmit} className="space-y-6">
                   {msg.text && (
                     <div className={`p-4 rounded-2xl text-sm flex items-center gap-3 ${msg.type === 'success' ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`}>
                       {msg.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
@@ -2185,36 +2948,70 @@ function AgentDashboard({ user }: { user: User }) {
                     />
                   </div>
 
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">ID Prefix</label>
-                      <input 
-                        type="text" 
-                        placeholder="AAA"
-                        required
-                        className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none"
-                        value={formData.id_prefix}
-                        onChange={(e) => {
-                          const newPrefix = e.target.value.toUpperCase();
-                          setFormData(prev => ({ ...prev, id_prefix: newPrefix, type: quotaInfo ? '' : prev.type }));
-                          setQuotaInfo(null);
+                  <div className="space-y-4">
+                    {isNfcSupported() && (
+                      <button 
+                        type="button"
+                        onClick={async () => {
+                          const button = document.getElementById('nfc-button') as HTMLButtonElement;
+                          const originalText = button.innerText;
+                          button.innerText = 'Scanning...';
+                          button.disabled = true;
+                          try {
+                            const tag = await readNfcTag();
+                            if (tag) {
+                              // Assuming tag format is PREFIX-NUMBER
+                              const parts = tag.split('-');
+                              if (parts.length >= 2) {
+                                setFormData(prev => ({ ...prev, id_prefix: parts[0], id_number: parts[1] }));
+                              } else {
+                                alert('Invalid NFC tag format. Expected PREFIX-NUMBER');
+                              }
+                            }
+                          } catch (err: any) {
+                            alert(err.message);
+                          } finally {
+                            button.innerText = originalText;
+                            button.disabled = false;
+                          }
                         }}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">ID Number</label>
-                      <input 
-                        type="text" 
-                        placeholder="0000"
-                        required
-                        className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none"
-                        value={formData.id_number}
-                        onChange={(e) => {
-                          const newNumber = e.target.value;
-                          setFormData(prev => ({ ...prev, id_number: newNumber, type: quotaInfo ? '' : prev.type }));
-                          setQuotaInfo(null);
-                        }}
-                      />
+                        id="nfc-button"
+                        className="w-full py-3 border-2 border-blue-600 text-blue-600 rounded-2xl font-bold hover:bg-blue-600 hover:text-white transition-all"
+                      >
+                        Pull from NFC (Android Only)
+                      </button>
+                    )}
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4"><T>ID Prefix</T></label>
+                        <input 
+                          type="text" 
+                          placeholder="AAA"
+                          required
+                          className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none"
+                          value={formData.id_prefix}
+                          onChange={(e) => {
+                            const newPrefix = e.target.value.toUpperCase();
+                            setFormData(prev => ({ ...prev, id_prefix: newPrefix, type: quotaInfo ? '' : prev.type }));
+                            setQuotaInfo(null);
+                          }}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4"><T>ID Number</T></label>
+                        <input 
+                          type="text" 
+                          placeholder="0000"
+                          required
+                          className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none"
+                          value={formData.id_number}
+                          onChange={(e) => {
+                            const newNumber = e.target.value;
+                            setFormData(prev => ({ ...prev, id_number: newNumber, type: quotaInfo ? '' : prev.type }));
+                            setQuotaInfo(null);
+                          }}
+                        />
+                      </div>
                     </div>
                   </div>
 
@@ -2223,7 +3020,7 @@ function AgentDashboard({ user }: { user: User }) {
                     onClick={checkQuota}
                     className="w-full py-3 border-2 border-[#141414] text-[#141414] rounded-2xl font-bold hover:bg-[#141414] hover:text-white transition-all"
                   >
-                    Check Vehicle Quota
+                    <T>Check Vehicle Quota</T>
                   </button>
 
                   {quotaInfo && (
@@ -2308,6 +3105,7 @@ function AgentDashboard({ user }: { user: User }) {
                     Confirm & Record
                   </button>
                 </form>
+                )}
               </div>
             </motion.div>
           </div>
@@ -2320,8 +3118,10 @@ function AgentDashboard({ user }: { user: User }) {
 function ManagerDashboard({ user }: { user: User }) {
   const [transactions, setTransactions] = useState<FuelTransaction[]>([]);
   const [agents, setAgents] = useState<User[]>([]);
-  const [activeTab, setActiveTab] = useState<'transactions' | 'agents'>('transactions');
+  const [station, setStation] = useState<FuelStation | null>(null);
+  const [activeTab, setActiveTab] = useState<'transactions' | 'agents' | 'billing' | 'end_of_day_sales'>('transactions');
   const [showAgentForm, setShowAgentForm] = useState(false);
+  const [showReductionForm, setShowReductionForm] = useState(false);
   const [agentData, setAgentData] = useState({ 
     username: '', 
     password: '', 
@@ -2339,6 +3139,10 @@ function ManagerDashboard({ user }: { user: User }) {
     if (!user.station_id) return;
     if (activeTab === 'transactions') setTransactions(await api.getManagerTransactions(user.station_id));
     if (activeTab === 'agents') setAgents(await api.getManagerAgents(user.station_id));
+    if (activeTab === 'end_of_day_sales') {
+      const stations = await api.getStations();
+      setStation(stations.find(s => s.id === user.station_id) || null);
+    }
   };
 
   const handleCreateAgent = async (e: React.FormEvent) => {
@@ -2385,7 +3189,7 @@ function ManagerDashboard({ user }: { user: User }) {
 
       {user.station_id && <StationBalanceWidget stationId={String(user.station_id)} />}
 
-      <div className="flex gap-2 p-1 bg-white rounded-2xl border border-[#141414]/5 w-fit">
+      <div className="flex flex-wrap gap-2 p-1 bg-white rounded-2xl border border-[#141414]/5 w-fit">
         <button
           onClick={() => setActiveTab('transactions')}
           className={`px-6 py-3 rounded-xl text-sm font-bold transition-all ${activeTab === 'transactions' ? 'bg-[#141414] text-white shadow-md' : 'hover:bg-[#F5F5F0]'}`}
@@ -2397,6 +3201,18 @@ function ManagerDashboard({ user }: { user: User }) {
           className={`px-6 py-3 rounded-xl text-sm font-bold transition-all ${activeTab === 'agents' ? 'bg-[#141414] text-white shadow-md' : 'hover:bg-[#F5F5F0]'}`}
         >
           Pumping Agents
+        </button>
+        <button
+          onClick={() => setActiveTab('billing')}
+          className={`px-6 py-3 rounded-xl text-sm font-bold transition-all ${activeTab === 'billing' ? 'bg-[#141414] text-white shadow-md' : 'hover:bg-[#F5F5F0]'}`}
+        >
+          Billing
+        </button>
+        <button
+          onClick={() => setActiveTab('end_of_day_sales')}
+          className={`px-6 py-3 rounded-xl text-sm font-bold transition-all ${activeTab === 'end_of_day_sales' ? 'bg-[#141414] text-white shadow-md' : 'hover:bg-[#F5F5F0]'}`}
+        >
+          End of Day Sales
         </button>
       </div>
 
@@ -2434,7 +3250,6 @@ function ManagerDashboard({ user }: { user: User }) {
             </div>
           </motion.div>
         )}
-
         {activeTab === 'agents' && (
           <motion.div 
             key="agents"
@@ -2469,6 +3284,44 @@ function ManagerDashboard({ user }: { user: User }) {
                 </tbody>
               </table>
             </div>
+          </motion.div>
+        )}
+        {activeTab === 'billing' && (
+          <motion.div 
+            key="billing"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-white/70 backdrop-blur-xl rounded-3xl border border-white/40 shadow-xl shadow-black/5 p-8"
+          >
+            <FinancialDashboard user={user} />
+          </motion.div>
+        )}
+        {activeTab === 'end_of_day_sales' && station && (
+          <motion.div 
+            key="end_of_day_sales"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-white/70 backdrop-blur-xl rounded-3xl border border-white/40 shadow-xl shadow-black/5 p-8"
+          >
+            <h3 className="text-2xl font-bold mb-6">End of Day Sales</h3>
+            <p className="mb-6 opacity-60">Record your end-of-day fuel sales to reduce station stock.</p>
+            <button 
+              onClick={() => setShowReductionForm(true)}
+              className="px-8 py-4 bg-[#141414] text-white rounded-2xl font-bold text-lg hover:bg-opacity-90 transition-all"
+            >
+              Record Sales
+            </button>
+            {showReductionForm && (
+              <StockReductionForm
+                station={station}
+                onClose={() => setShowReductionForm(false)}
+                onSuccess={() => {
+                  setShowReductionForm(false);
+                  loadData();
+                }}
+                managerId={user.id}
+              />
+            )}
           </motion.div>
         )}
       </AnimatePresence>
@@ -2534,9 +3387,11 @@ function ManagerDashboard({ user }: { user: User }) {
           </div>
         )}
       </AnimatePresence>
+      <FuelPriceDisplay />
     </div>
   );
 }
+
 
 function PublicStationBalances() {
   const [stations, setStations] = useState<FuelStation[]>([]);
@@ -2818,17 +3673,42 @@ function AnalyticsDashboard({ typeLimits }: { typeLimits: VehicleTypeLimit[] }) 
   );
 }
 
+function ConfirmationModal({ isOpen, title, message, onConfirm, onCancel }: { isOpen: boolean, title: string, message: string, onConfirm: () => void, onCancel: () => void }) {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-[#141414]/80 backdrop-blur-md">
+      <div className="bg-white w-full max-w-sm rounded-[2.5rem] p-8 shadow-2xl">
+        <h3 className="text-xl font-bold mb-2">{title}</h3>
+        <p className="opacity-60 mb-8">{message}</p>
+        <div className="flex gap-4">
+          <button onClick={onCancel} className="flex-1 py-3 bg-[#F5F5F0] rounded-2xl font-bold hover:bg-gray-200 transition-all">Cancel</button>
+          <button onClick={onConfirm} className="flex-1 py-3 bg-red-600 text-white rounded-2xl font-bold hover:bg-red-700 transition-all">Delete</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AdminDashboard({ user }: { user: User }) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'vehicles' | 'stations' | 'audit' | 'limits' | 'reports' | 'distribution'>('overview');
+  console.log("AdminDashboard: user =", user);
+  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'vehicles' | 'stations' | 'audit' | 'limits' | 'reports' | 'distribution' | 'live_chat' | 'complaints' | 'stock' | 'billing' | 'fuel_prices' | 'consumption_logs'>(
+    user.role === 'distributor' ? 'distribution' : 
+    user.role === 'support' ? 'complaints' : 'overview'
+  );
   const [summary, setSummary] = useState<any>(null);
+  const [distSummary, setDistSummary] = useState<any>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [stations, setStations] = useState<FuelStation[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [globalStock, setGlobalStock] = useState<any>(null);
+  const [showStationStockForm, setShowStationStockForm] = useState(false);
+  const [stationStockData, setStationStockData] = useState({ petrol_92: '', petrol_95: '', diesel: '', super_diesel: '' });
   const [typeLimits, setTypeLimits] = useState<VehicleTypeLimit[]>([]);
   const [detailedTransactions, setDetailedTransactions] = useState<FuelTransaction[]>([]);
   const [stationReports, setStationReports] = useState<any[]>([]);
   const [distributions, setDistributions] = useState<FuelDistribution[]>([]);
+  const [consumptionLogs, setConsumptionLogs] = useState<any[]>([]);
   
   const [reportFilters, setReportFilters] = useState({
     station_id: '',
@@ -2839,6 +3719,7 @@ function AdminDashboard({ user }: { user: User }) {
   });
   
   const [showUserForm, setShowUserForm] = useState(false);
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [userData, setUserData] = useState({ 
     username: '', 
     password: '', 
@@ -2851,12 +3732,32 @@ function AdminDashboard({ user }: { user: User }) {
   const [typeData, setTypeData] = useState({ type: '', fuel_limit: '', limit_period: 'week' });
 
   const [showStationForm, setShowStationForm] = useState(false);
-  const [stationData, setStationData] = useState({ name: '', location: '' });
+  const [stationData, setStationData] = useState({ name: '', location: '', lat: '', lng: '' });
 
   const [showFuelForm, setShowFuelForm] = useState(false);
   const [fuelData, setFuelData] = useState({ station_id: '', amount: '', fuel_type: 'Petrol 92' });
 
+  const [showGlobalStockForm, setShowGlobalStockForm] = useState(false);
+  const [globalStockData, setGlobalStockData] = useState({ fuel_type: 'Petrol 92', amount: '' });
+
   const [msg, setMsg] = useState({ text: '', type: '' });
+
+  const tabs = [
+    { id: 'overview', icon: TrendingUp, label: 'Analytics', roles: ['admin', 'distributor'] },
+    { id: 'reports', icon: FileText, label: 'Reports', roles: ['admin'] },
+    { id: 'stock', icon: Shield, label: 'Stock Management', roles: ['admin', 'distributor', 'manager'] },
+    { id: 'distribution', icon: Droplets, label: user.role === 'distributor' ? 'Distribution Management' : 'Fuel Distribution', roles: ['admin', 'distributor'] },
+    { id: 'users', icon: Users, label: 'Users', roles: ['admin'] },
+    { id: 'limits', icon: Settings, label: 'Type Limits', roles: ['admin'] },
+    { id: 'vehicles', icon: Car, label: 'Vehicles', roles: ['admin'] },
+    { id: 'billing', icon: CreditCard, label: 'Billing', roles: ['admin', 'distributor'] },
+    { id: 'stations', icon: MapPin, label: 'Stations', roles: ['admin'] },
+    { id: 'audit', icon: Shield, label: 'Audit Logs', roles: ['admin'] },
+    { id: 'live_chat', icon: MessageCircle, label: 'Live Chat Manager', roles: ['admin', 'support'] },
+    { id: 'complaints', icon: AlertCircle, label: 'Complaints Management', roles: ['admin', 'support'] },
+    { id: 'consumption_logs', icon: History, label: 'Consumption Logs', roles: ['admin'] },
+    { id: 'fuel_prices', icon: Fuel, label: 'Fuel Prices', roles: ['admin'] },
+  ].filter(tab => tab.roles.includes(user.role));
 
   const throwError = useAsyncError();
 
@@ -2868,6 +3769,10 @@ function AdminDashboard({ user }: { user: User }) {
     if (activeTab === 'overview') {
       setSummary(await api.getSummary());
       setTypeLimits(await api.getTypeLimits());
+      setGlobalStock(await api.getGlobalStock());
+      if (user.role === 'admin') {
+        setDistSummary(await api.getDistributorSummary());
+      }
     }
     if (activeTab === 'users') {
       setUsers(await api.getUsers());
@@ -2885,7 +3790,13 @@ function AdminDashboard({ user }: { user: User }) {
     if (activeTab === 'distribution') {
       setDistributions(await api.getStationDistributions(reportFilters));
       setStations(await api.getStations());
+      setGlobalStock(await api.getGlobalStock());
     }
+    if (activeTab === 'consumption_logs') {
+      const logs = await getDocs(collection(db, 'fuel_consumption_logs'));
+      setConsumptionLogs(logs.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    }
+    // Complaints are loaded within AdminComplaintsView
   };
 
   const handleAddFuel = async (e: React.FormEvent) => {
@@ -2901,6 +3812,19 @@ function AdminDashboard({ user }: { user: User }) {
     }
   };
 
+  const handleUpdateGlobalStock = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api.updateGlobalStock(globalStockData.fuel_type, parseFloat(globalStockData.amount));
+      setMsg({ text: 'Global stock updated successfully!', type: 'success' });
+      setGlobalStockData({ fuel_type: 'Petrol 92', amount: '' });
+      loadData();
+      setTimeout(() => setShowGlobalStockForm(false), 1500);
+    } catch (err: any) {
+      setMsg({ text: getErrorMessage(err), type: 'error' });
+    }
+  };
+
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -2908,11 +3832,24 @@ function AdminDashboard({ user }: { user: User }) {
         ? (userData.station_id || null) 
         : null;
       
-      await api.createSystemUser({
-        ...userData,
-        station_id: stationId
-      });
-      setMsg({ text: 'User created successfully!', type: 'success' });
+      if (editingUserId) {
+        const updateData: any = { ...userData, station_id: stationId };
+        if (!updateData.password) {
+          delete updateData.password;
+        }
+        // Remove undefined values to prevent Firestore errors
+        Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
+        
+        await api.updateUser(editingUserId, updateData);
+        setMsg({ text: 'User updated successfully!', type: 'success' });
+      } else {
+        await api.createSystemUser({
+          ...userData,
+          station_id: stationId
+        });
+        setMsg({ text: 'User created successfully!', type: 'success' });
+      }
+      
       setUserData({ 
         username: '', 
         password: '', 
@@ -2920,11 +3857,24 @@ function AdminDashboard({ user }: { user: User }) {
         role: 'agent', 
         station_id: '' 
       });
+      setEditingUserId(null);
       loadData();
       setTimeout(() => setShowUserForm(false), 1500);
     } catch (err: any) {
       setMsg({ text: getErrorMessage(err), type: 'error' });
     }
+  };
+
+  const handleEditUserClick = (u: User) => {
+    setEditingUserId(u.id);
+    setUserData({
+      username: u.username || '',
+      password: '', // Don't populate password
+      full_name: u.full_name || '',
+      role: u.role || 'agent',
+      station_id: u.station_id || ''
+    });
+    setShowUserForm(true);
   };
 
   const handleCreateType = async (e: React.FormEvent) => {
@@ -2940,11 +3890,12 @@ function AdminDashboard({ user }: { user: User }) {
     }
   };
 
+  const [deleteTarget, setDeleteTarget] = useState<{ type: 'user' | 'station', id: string } | null>(null);
+
   const handleDeleteUser = async (userId: string) => {
-    if (confirm('Are you sure you want to delete this user?')) {
-      await api.deleteUser(userId);
-      loadData();
-    }
+    await api.deleteUser(userId);
+    loadData();
+    setDeleteTarget(null);
   };
 
   const handleUpdateLimit = async (type: string, limit: number, period: string) => {
@@ -2953,18 +3904,38 @@ function AdminDashboard({ user }: { user: User }) {
   };
 
   const handleDeleteStation = async (stationId: string) => {
-    if (confirm('Are you sure you want to delete this station?')) {
-      await api.deleteStation(stationId);
-      loadData();
-    }
+    await api.deleteStation(stationId);
+    loadData();
+    setDeleteTarget(null);
+  };
+
+  const [editingStationId, setEditingStationId] = useState<string | null>(null);
+
+  const handleEditStationClick = (s: FuelStation) => {
+    setEditingStationId(s.id);
+    setStationData({ name: s.name, location: s.location, lat: s.lat?.toString() || '', lng: s.lng?.toString() || '' });
+    setShowStationForm(true);
   };
 
   const handleCreateStation = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await api.createStation(stationData);
-      setMsg({ text: 'Station created successfully!', type: 'success' });
-      setStationData({ name: '', location: '' });
+      const data: any = {
+        name: stationData.name,
+        location: stationData.location
+      };
+      if (stationData.lat) data.lat = parseFloat(stationData.lat);
+      if (stationData.lng) data.lng = parseFloat(stationData.lng);
+      
+      if (editingStationId) {
+        await api.updateStation(editingStationId, data);
+        setMsg({ text: 'Station updated successfully!', type: 'success' });
+      } else {
+        await api.createStation(data);
+        setMsg({ text: 'Station created successfully!', type: 'success' });
+      }
+      setStationData({ name: '', location: '', lat: '', lng: '' });
+      setEditingStationId(null);
       loadData();
       setTimeout(() => setShowStationForm(false), 1500);
     } catch (err: any) {
@@ -2972,65 +3943,125 @@ function AdminDashboard({ user }: { user: User }) {
     }
   };
 
+  const handleUpdateStationStock = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api.updateStationFuelConsumption(user.station_id!, {
+        petrol_92: parseFloat(stationStockData.petrol_92 || '0'),
+        petrol_95: parseFloat(stationStockData.petrol_95 || '0'),
+        diesel: parseFloat(stationStockData.diesel || '0'),
+        super_diesel: parseFloat(stationStockData.super_diesel || '0'),
+      });
+      setMsg({ text: 'Station stock updated successfully!', type: 'success' });
+      setStationStockData({ petrol_92: '', petrol_95: '', diesel: '', super_diesel: '' });
+      loadData();
+      setTimeout(() => setShowStationStockForm(false), 1500);
+    } catch (err: any) {
+      setMsg({ text: getErrorMessage(err), type: 'error' });
+    }
+  };
+
   return (
-    <div className="space-y-8">
-      <div className="flex justify-between items-center">
+    <div className="space-y-10">
+      <ConfirmationModal 
+        isOpen={!!deleteTarget}
+        title={`Delete ${deleteTarget?.type === 'user' ? 'User' : 'Station'}`}
+        message={`Are you sure you want to delete this ${deleteTarget?.type}? This action cannot be undone.`}
+        onConfirm={() => deleteTarget?.type === 'user' ? handleDeleteUser(deleteTarget.id) : handleDeleteStation(deleteTarget.id)}
+        onCancel={() => setDeleteTarget(null)}
+      />
+
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
         <div>
-          <h2 className="text-3xl font-bold tracking-tight">Admin Control Panel</h2>
-          <p className="opacity-50">System-wide monitoring and management</p>
+          <h2 className="text-4xl font-bold tracking-tight">
+            {user.role === 'distributor' ? 'Distribution Hub' : 
+             user.role === 'support' ? 'Support Center' : 'Admin Control Panel'}
+          </h2>
+          <p className="text-sm opacity-40 font-medium uppercase tracking-widest mt-2">
+            {user.role === 'distributor' ? 'Fuel logistics & supply management' : 
+             user.role === 'support' ? 'User assistance & grievance resolution' : 'System-wide monitoring and management'}
+          </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-3">
           {activeTab === 'users' && (
             <button 
               onClick={() => { setShowUserForm(true); setMsg({ text: '', type: '' }); }}
-              className="px-6 py-3 bg-[#141414] text-white rounded-full font-bold flex items-center gap-2"
+              className="px-8 py-4 bg-[#141414] text-white rounded-2xl font-bold flex items-center gap-2 shadow-lg shadow-black/10 hover:scale-105 transition-all"
             >
-              <Plus className="w-4 h-4" /> Add User
+              <Plus className="w-5 h-5" /> Add User
             </button>
           )}
           {activeTab === 'limits' && (
             <button 
               onClick={() => { setShowTypeForm(true); setMsg({ text: '', type: '' }); }}
-              className="px-6 py-3 bg-[#141414] text-white rounded-full font-bold flex items-center gap-2"
+              className="px-8 py-4 bg-[#141414] text-white rounded-2xl font-bold flex items-center gap-2 shadow-lg shadow-black/10 hover:scale-105 transition-all"
             >
-              <Plus className="w-4 h-4" /> Add Type
+              <Plus className="w-5 h-5" /> Add Type
             </button>
           )}
           {activeTab === 'stations' && (
             <button 
-              onClick={() => { setShowStationForm(true); setMsg({ text: '', type: '' }); }}
-              className="px-6 py-3 bg-[#141414] text-white rounded-full font-bold flex items-center gap-2"
+              onClick={() => { setShowStationForm(true); setEditingStationId(null); setStationData({ name: '', location: '', lat: '', lng: '' }); setMsg({ text: '', type: '' }); }}
+              className="px-8 py-4 bg-[#141414] text-white rounded-2xl font-bold flex items-center gap-2 shadow-lg shadow-black/10 hover:scale-105 transition-all"
             >
-              <Plus className="w-4 h-4" /> Add Station
+              <Plus className="w-5 h-5" /> Add Station
+            </button>
+          )}
+          {activeTab === 'stock' && user.role === 'manager' && (
+            <button 
+              onClick={() => { setShowStationStockForm(true); setMsg({ text: '', type: '' }); }}
+              className="px-8 py-4 bg-blue-600 text-white rounded-2xl font-bold flex items-center gap-2 shadow-lg shadow-blue-600/20 hover:scale-105 transition-all"
+            >
+              <Plus className="w-5 h-5" /> Update Daily Consumption
+            </button>
+          )}
+          {activeTab === 'stock' && (user.role === 'admin' || user.role === 'distributor') && (
+            <button 
+              onClick={() => { setShowGlobalStockForm(true); setMsg({ text: '', type: '' }); }}
+              className="px-8 py-4 bg-blue-600 text-white rounded-2xl font-bold flex items-center gap-2 shadow-lg shadow-blue-600/20 hover:scale-105 transition-all"
+            >
+              <Plus className="w-5 h-5" /> Update Global Stock
             </button>
           )}
           {activeTab === 'distribution' && (
             <button 
               onClick={() => { setShowFuelForm(true); setMsg({ text: '', type: '' }); }}
-              className="px-6 py-3 bg-[#141414] text-white rounded-full font-bold flex items-center gap-2"
+              className="px-8 py-4 bg-[#141414] text-white rounded-2xl font-bold flex items-center gap-2 shadow-lg shadow-black/10 hover:scale-105 transition-all"
             >
-              <Droplets className="w-4 h-4" /> Distribute Fuel
+              <Droplets className="w-5 h-5" /> Distribute Fuel
             </button>
           )}
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-2 p-1 bg-white rounded-2xl border border-[#141414]/5 w-fit">
-        {[
-          { id: 'overview', icon: TrendingUp, label: 'Analytics' },
-          { id: 'reports', icon: FileText, label: 'Reports' },
-          { id: 'distribution', icon: Droplets, label: 'Fuel Distribution' },
-          { id: 'users', icon: Users, label: 'Users' },
-          { id: 'limits', icon: Settings, label: 'Type Limits' },
-          { id: 'vehicles', icon: Car, label: 'Vehicles' },
-          { id: 'stations', icon: MapPin, label: 'Stations' },
-          { id: 'audit', icon: Shield, label: 'Audit Logs' },
-        ].map(tab => (
+      {/* Mobile Tab Selector */}
+      <div className="md:hidden w-full">
+        <div className="relative">
+          <select
+            value={activeTab}
+            onChange={(e) => setActiveTab(e.target.value as any)}
+            className="w-full px-6 py-4 bg-white rounded-2xl border border-[#141414]/5 font-bold text-sm appearance-none outline-none shadow-sm"
+          >
+            {tabs.map(tab => (
+              <option key={tab.id} value={tab.id}>{tab.label}</option>
+            ))}
+          </select>
+          <div className="absolute right-6 top-1/2 -translate-y-1/2 pointer-events-none opacity-40">
+            <ChevronRight className="w-5 h-5 rotate-90" />
+          </div>
+        </div>
+      </div>
+
+      {/* Desktop Tabs */}
+      <div className="hidden md:flex flex-wrap gap-2 p-2 bg-white/50 backdrop-blur-md rounded-[2rem] border border-[#141414]/5 w-fit shadow-sm">
+        {tabs.map(tab => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id as any)}
-            className={`px-6 py-3 rounded-xl text-sm font-bold flex items-center gap-2 transition-all ${
-              activeTab === tab.id ? 'bg-[#141414] text-white shadow-md' : 'hover:bg-[#F5F5F0]'
+            className={`px-6 py-3 rounded-xl text-xs font-bold flex items-center gap-2 transition-all uppercase tracking-widest ${
+              activeTab === tab.id 
+                ? 'bg-[#141414] text-white shadow-lg shadow-black/10' 
+                : 'opacity-40 hover:opacity-100 hover:bg-[#141414]/5'
             }`}
           >
             <tab.icon className="w-4 h-4" />
@@ -3040,13 +4071,96 @@ function AdminDashboard({ user }: { user: User }) {
       </div>
 
       <AnimatePresence mode="wait">
+        {activeTab === 'fuel_prices' && (
+          <motion.div 
+            key="fuel_prices"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+          >
+            <FuelPriceManager />
+          </motion.div>
+        )}
         {activeTab === 'overview' && (
           <motion.div 
             key="overview"
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
+            className="space-y-8"
           >
             <AnalyticsDashboard typeLimits={typeLimits} />
+            
+            {user.role === 'admin' && distSummary && (
+              <div className="bg-white/70 backdrop-blur-xl p-10 rounded-[2.5rem] border border-white/40 shadow-xl shadow-black/5">
+                <h3 className="text-xl font-bold mb-8 flex items-center gap-3">
+                  <Droplets className="w-6 h-6 text-blue-500" />
+                  Distribution Summary
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                  <div className="bg-blue-50 p-6 rounded-3xl">
+                    <p className="text-[10px] uppercase font-bold opacity-40 mb-1">Total Petrol 92</p>
+                    <p className="text-2xl font-bold">{distSummary.totalPetrol92.toLocaleString()}L</p>
+                  </div>
+                  <div className="bg-indigo-50 p-6 rounded-3xl">
+                    <p className="text-[10px] uppercase font-bold opacity-40 mb-1">Total Petrol 95</p>
+                    <p className="text-2xl font-bold">{distSummary.totalPetrol95.toLocaleString()}L</p>
+                  </div>
+                  <div className="bg-emerald-50 p-6 rounded-3xl">
+                    <p className="text-[10px] uppercase font-bold opacity-40 mb-1">Total Diesel</p>
+                    <p className="text-2xl font-bold">{distSummary.totalDiesel.toLocaleString()}L</p>
+                  </div>
+                  <div className="bg-teal-50 p-6 rounded-3xl">
+                    <p className="text-[10px] uppercase font-bold opacity-40 mb-1">Total Super Diesel</p>
+                    <p className="text-2xl font-bold">{distSummary.totalSuperDiesel.toLocaleString()}L</p>
+                  </div>
+                </div>
+              </div>
+            )}
+          </motion.div>
+        )}
+        {activeTab === 'billing' && (
+          <motion.div 
+            key="billing"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-white/70 backdrop-blur-xl rounded-3xl border border-white/40 shadow-xl shadow-black/5 p-8"
+          >
+            <FinancialDashboard user={user} />
+          </motion.div>
+        )}
+
+        {activeTab === 'stock' && (
+          <motion.div 
+            key="stock"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="space-y-8"
+          >
+            {globalStock && (
+              <div className="bg-white/70 backdrop-blur-xl p-10 rounded-[2.5rem] border border-white/40 shadow-xl shadow-black/5">
+                <h3 className="text-xl font-bold mb-8 flex items-center gap-3">
+                  <Shield className="w-6 h-6 text-indigo-500" />
+                  Global Fuel Inventory
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                  <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
+                    <p className="text-[10px] uppercase font-bold opacity-40 mb-1">Petrol 92</p>
+                    <p className="text-3xl font-bold">{globalStock.petrol_92?.toLocaleString() || 0}L</p>
+                  </div>
+                  <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
+                    <p className="text-[10px] uppercase font-bold opacity-40 mb-1">Petrol 95</p>
+                    <p className="text-3xl font-bold">{globalStock.petrol_95?.toLocaleString() || 0}L</p>
+                  </div>
+                  <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
+                    <p className="text-[10px] uppercase font-bold opacity-40 mb-1">Diesel</p>
+                    <p className="text-3xl font-bold">{globalStock.diesel?.toLocaleString() || 0}L</p>
+                  </div>
+                  <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
+                    <p className="text-[10px] uppercase font-bold opacity-40 mb-1">Super Diesel</p>
+                    <p className="text-3xl font-bold">{globalStock.super_diesel?.toLocaleString() || 0}L</p>
+                  </div>
+                </div>
+              </div>
+            )}
           </motion.div>
         )}
 
@@ -3251,81 +4365,132 @@ function AdminDashboard({ user }: { user: User }) {
             animate={{ opacity: 1, y: 0 }}
             className="space-y-8"
           >
+            {/* Distribution Stats */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+              {[
+                { label: 'Total Petrol 92', value: distributions.filter(d => d.fuel_type === 'Petrol 92').reduce((acc, d) => acc + d.amount, 0), color: 'bg-blue-50 text-blue-600' },
+                { label: 'Total Petrol 95', value: distributions.filter(d => d.fuel_type === 'Petrol 95').reduce((acc, d) => acc + d.amount, 0), color: 'bg-indigo-50 text-indigo-600' },
+                { label: 'Total Diesel', value: distributions.filter(d => d.fuel_type === 'Diesel').reduce((acc, d) => acc + d.amount, 0), color: 'bg-emerald-50 text-emerald-600' },
+                { label: 'Total Super Diesel', value: distributions.filter(d => d.fuel_type === 'Super Diesel').reduce((acc, d) => acc + d.amount, 0), color: 'bg-teal-50 text-teal-600' },
+              ].map((stat, i) => (
+                <div key={i} className={`${stat.color} p-6 rounded-[2rem] border border-white/20 shadow-sm`}>
+                  <p className="text-[10px] uppercase font-bold opacity-60 mb-1">{stat.label}</p>
+                  <p className="text-2xl font-bold">{stat.value.toLocaleString()}L</p>
+                </div>
+              ))}
+            </div>
+
             {/* Filters */}
-            <div className="bg-white/70 backdrop-blur-xl p-6 rounded-3xl border border-white/40 shadow-xl shadow-black/5">
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold uppercase opacity-40 ml-2">Station</label>
-                  <select 
-                    className="w-full px-4 py-2 bg-[#F5F5F0] rounded-xl text-sm outline-none"
-                    value={reportFilters.station_id}
-                    onChange={(e) => setReportFilters({ ...reportFilters, station_id: e.target.value })}
-                  >
-                    <option value="">All Stations</option>
-                    {stations.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                  </select>
+            <div className="bg-white/70 backdrop-blur-xl p-8 rounded-[2.5rem] border border-white/40 shadow-xl shadow-black/5">
+              <div className="flex flex-col md:flex-row justify-between items-center gap-6 mb-8">
+                <h3 className="text-xl font-bold flex items-center gap-3">
+                  <Filter className="w-5 h-5 opacity-40" />
+                  Filter Distributions
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 w-full md:w-auto flex-1 max-w-4xl">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold uppercase opacity-40 ml-2">Station</label>
+                    <select 
+                      className="w-full px-4 py-3 bg-[#F5F5F0] rounded-2xl text-sm outline-none border-none"
+                      value={reportFilters.station_id}
+                      onChange={(e) => setReportFilters({ ...reportFilters, station_id: e.target.value })}
+                    >
+                      <option value="">All Stations</option>
+                      {stations.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold uppercase opacity-40 ml-2">Fuel Type</label>
+                    <select 
+                      className="w-full px-4 py-3 bg-[#F5F5F0] rounded-2xl text-sm outline-none border-none"
+                      value={reportFilters.fuel_type}
+                      onChange={(e) => setReportFilters({ ...reportFilters, fuel_type: e.target.value })}
+                    >
+                      <option value="">All Types</option>
+                      <option value="Petrol 92">Petrol 92</option>
+                      <option value="Petrol 95">Petrol 95</option>
+                      <option value="Diesel">Diesel</option>
+                      <option value="Super Diesel">Super Diesel</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold uppercase opacity-40 ml-2">Start Date</label>
+                    <input 
+                      type="date"
+                      className="w-full px-4 py-3 bg-[#F5F5F0] rounded-2xl text-sm outline-none border-none"
+                      value={reportFilters.start_date}
+                      onChange={(e) => setReportFilters({ ...reportFilters, start_date: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold uppercase opacity-40 ml-2">End Date</label>
+                    <input 
+                      type="date"
+                      className="w-full px-4 py-3 bg-[#F5F5F0] rounded-2xl text-sm outline-none border-none"
+                      value={reportFilters.end_date}
+                      onChange={(e) => setReportFilters({ ...reportFilters, end_date: e.target.value })}
+                    />
+                  </div>
                 </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold uppercase opacity-40 ml-2">Fuel Type</label>
-                  <select 
-                    className="w-full px-4 py-2 bg-[#F5F5F0] rounded-xl text-sm outline-none"
-                    value={reportFilters.fuel_type}
-                    onChange={(e) => setReportFilters({ ...reportFilters, fuel_type: e.target.value })}
-                  >
-                    <option value="">All Types</option>
-                    <option value="Petrol 92">Petrol 92</option>
-                    <option value="Petrol 95">Petrol 95</option>
-                    <option value="Diesel">Diesel</option>
-                    <option value="Super Diesel">Super Diesel</option>
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold uppercase opacity-40 ml-2">Start Date</label>
-                  <input 
-                    type="date"
-                    className="w-full px-4 py-2 bg-[#F5F5F0] rounded-xl text-sm outline-none"
-                    value={reportFilters.start_date}
-                    onChange={(e) => setReportFilters({ ...reportFilters, start_date: e.target.value })}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold uppercase opacity-40 ml-2">End Date</label>
-                  <input 
-                    type="date"
-                    className="w-full px-4 py-2 bg-[#F5F5F0] rounded-xl text-sm outline-none"
-                    value={reportFilters.end_date}
-                    onChange={(e) => setReportFilters({ ...reportFilters, end_date: e.target.value })}
-                  />
+              </div>
+
+              <div className="bg-white rounded-[2rem] border border-[#141414]/5 shadow-sm overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="bg-[#F5F5F0]/50 text-[10px] uppercase tracking-widest font-bold opacity-50">
+                        <th className="px-8 py-5">Date & Time</th>
+                        <th className="px-8 py-5">Station</th>
+                        <th className="px-8 py-5">Fuel Type</th>
+                        <th className="px-8 py-5 text-right">Amount Distributed</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#141414]/5">
+                      {distributions.map(d => (
+                        <tr key={d.id} className="hover:bg-[#F5F5F0]/30 transition-colors">
+                          <td className="px-8 py-5 text-sm">
+                            <div className="flex flex-col">
+                              <span className="font-medium">{new Date(d.timestamp).toLocaleDateString()}</span>
+                              <span className="text-[10px] opacity-40">{new Date(d.timestamp).toLocaleTimeString()}</span>
+                            </div>
+                          </td>
+                          <td className="px-8 py-5">
+                            <div className="flex items-center gap-2">
+                              <div className="w-8 h-8 rounded-full bg-[#141414]/5 flex items-center justify-center">
+                                <MapPin className="w-4 h-4 opacity-40" />
+                              </div>
+                              <span className="font-bold">{d.station_name}</span>
+                            </div>
+                          </td>
+                          <td className="px-8 py-5">
+                            <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                              d.fuel_type.includes('Petrol') ? 'bg-blue-50 text-blue-600' : 'bg-emerald-50 text-emerald-600'
+                            }`}>
+                              {d.fuel_type}
+                            </span>
+                          </td>
+                          <td className="px-8 py-5 text-sm font-bold text-right text-green-600">
+                            <div className="flex flex-col items-end">
+                              <span>+{d.amount.toLocaleString()}L</span>
+                              <span className="text-[10px] opacity-40 font-normal">Stock Added</span>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                      {distributions.length === 0 && (
+                        <tr>
+                          <td colSpan={4} className="px-8 py-20 text-center opacity-30 italic">
+                            No distribution records found for the selected filters
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
-
-            <div className="bg-white rounded-3xl border border-[#141414]/5 shadow-sm overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left">
-                <thead>
-                  <tr className="bg-[#F5F5F0]/50 text-[10px] uppercase tracking-widest font-bold opacity-50">
-                    <th className="px-8 py-4">Date & Time</th>
-                    <th className="px-8 py-4">Station</th>
-                    <th className="px-8 py-4">Fuel Type</th>
-                    <th className="px-8 py-4 text-right">Amount Distributed</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#141414]/5">
-                  {distributions.map(d => (
-                    <tr key={d.id} className="hover:bg-[#F5F5F0]/30 transition-colors">
-                      <td className="px-8 py-4 text-sm">{new Date(d.timestamp).toLocaleString()}</td>
-                      <td className="px-8 py-4 font-bold">{d.station_name}</td>
-                      <td className="px-8 py-4 text-xs font-bold opacity-50">{d.fuel_type}</td>
-                      <td className="px-8 py-4 text-sm font-bold text-right text-green-600">+{d.amount}L</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </motion.div>
-      )}
+          </motion.div>
+        )}
 
         {activeTab === 'users' && (
           <motion.div 
@@ -3361,8 +4526,8 @@ function AdminDashboard({ user }: { user: User }) {
                         </span>
                       </td>
                       <td className="px-8 py-4 text-right flex justify-end gap-2">
-                        <button className="text-xs font-bold hover:underline">Edit</button>
-                        <button onClick={() => handleDeleteUser(u.id)} className="text-xs font-bold text-red-600 hover:underline">Delete</button>
+                        <button onClick={() => handleEditUserClick(u)} className="text-xs font-bold hover:underline">Edit</button>
+                        <button onClick={() => setDeleteTarget({ type: 'user', id: u.id })} className="text-xs font-bold text-red-600 hover:underline">Delete</button>
                       </td>
                     </tr>
                   ))}
@@ -3472,8 +4637,8 @@ function AdminDashboard({ user }: { user: User }) {
                       <td className="px-8 py-4 text-sm font-bold text-right">{s.balance_diesel?.toLocaleString()}L</td>
                       <td className="px-8 py-4 text-sm font-bold text-right">{s.balance_super_diesel?.toLocaleString()}L</td>
                       <td className="px-8 py-4 text-right flex justify-end gap-2">
-                        <button className="text-xs font-bold hover:underline">Edit</button>
-                        <button onClick={() => handleDeleteStation(s.id)} className="text-xs font-bold text-red-600 hover:underline">Delete</button>
+                        <button onClick={() => handleEditStationClick(s)} className="text-xs font-bold hover:underline">Edit</button>
+                        <button onClick={() => setDeleteTarget({ type: 'station', id: s.id })} className="text-xs font-bold text-red-600 hover:underline">Delete</button>
                       </td>
                     </tr>
                   ))}
@@ -3514,6 +4679,27 @@ function AdminDashboard({ user }: { user: User }) {
                 </tbody>
               </table>
             </div>
+          </motion.div>
+        )}
+
+        {activeTab === 'live_chat' && (
+          <motion.div 
+            key="live_chat"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+          >
+            <AdminLiveChat />
+          </motion.div>
+        )}
+
+        {activeTab === 'complaints' && (
+          <motion.div 
+            key="complaints"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="h-[calc(100vh-200px)]"
+          >
+            <AdminComplaintsView user={user} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -3643,12 +4829,140 @@ function AdminDashboard({ user }: { user: User }) {
                     />
                   </div>
 
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Latitude</label>
+                      <input 
+                        type="number" 
+                        step="any"
+                        className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none"
+                        value={stationData.lat}
+                        onChange={(e) => setStationData({ ...stationData, lat: e.target.value })}
+                        placeholder="e.g. 9.6615"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Longitude</label>
+                      <input 
+                        type="number" 
+                        step="any"
+                        className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none"
+                        value={stationData.lng}
+                        onChange={(e) => setStationData({ ...stationData, lng: e.target.value })}
+                        placeholder="e.g. 80.0255"
+                      />
+                    </div>
+                  </div>
+
                   <button 
                     type="submit"
                     className="w-full py-5 bg-[#141414] text-white rounded-2xl font-bold text-lg hover:bg-opacity-90 transition-all"
                   >
                     Create Station
                   </button>
+                </form>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showStationStockForm && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-[#141414]/40 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              className="bg-white w-full max-w-md rounded-[2.5rem] shadow-2xl"
+            >
+              <div className="p-10">
+                <div className="flex justify-between items-center mb-8">
+                  <h3 className="text-2xl font-bold">Update Daily Consumption</h3>
+                  <button onClick={() => setShowStationStockForm(false)} className="p-2 hover:bg-[#F5F5F0] rounded-full transition-colors">
+                    <XCircle className="w-6 h-6 opacity-30" />
+                  </button>
+                </div>
+                <form onSubmit={handleUpdateStationStock} className="space-y-6">
+                  {msg.text && (
+                    <div className={`p-4 rounded-2xl text-sm flex items-center gap-3 ${msg.type === 'success' ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`}>
+                      {msg.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+                      {msg.text}
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Petrol 92 (L)</label>
+                    <input type="number" className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none" value={stationStockData.petrol_92} onChange={e => setStationStockData({...stationStockData, petrol_92: e.target.value})} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Petrol 95 (L)</label>
+                    <input type="number" className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none" value={stationStockData.petrol_95} onChange={e => setStationStockData({...stationStockData, petrol_95: e.target.value})} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Diesel (L)</label>
+                    <input type="number" className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none" value={stationStockData.diesel} onChange={e => setStationStockData({...stationStockData, diesel: e.target.value})} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Super Diesel (L)</label>
+                    <input type="number" className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none" value={stationStockData.super_diesel} onChange={e => setStationStockData({...stationStockData, super_diesel: e.target.value})} />
+                  </div>
+                  <button type="submit" className="w-full py-4 bg-[#141414] text-white rounded-2xl font-bold hover:scale-105 transition-all">Update Consumption</button>
+                </form>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showGlobalStockForm && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-[#141414]/40 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              className="bg-white w-full max-w-md rounded-[2.5rem] shadow-2xl"
+            >
+              <div className="p-10">
+                <div className="flex justify-between items-center mb-8">
+                  <h3 className="text-2xl font-bold">Update Global Stock</h3>
+                  <button onClick={() => setShowGlobalStockForm(false)} className="p-2 hover:bg-[#F5F5F0] rounded-full transition-colors">
+                    <XCircle className="w-6 h-6 opacity-30" />
+                  </button>
+                </div>
+                <form onSubmit={handleUpdateGlobalStock} className="space-y-6">
+                  {msg.text && (
+                    <div className={`p-4 rounded-2xl text-sm flex items-center gap-3 ${msg.type === 'success' ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`}>
+                      {msg.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+                      {msg.text}
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Fuel Type</label>
+                    <select 
+                      required
+                      className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none appearance-none"
+                      value={globalStockData.fuel_type}
+                      onChange={(e) => setGlobalStockData({ ...globalStockData, fuel_type: e.target.value })}
+                    >
+                      <option value="Petrol 92">Petrol 92</option>
+                      <option value="Petrol 95">Petrol 95</option>
+                      <option value="Diesel">Diesel</option>
+                      <option value="Super Diesel">Super Diesel</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Amount to Add (Liters)</label>
+                    <input 
+                      type="number" 
+                      step="0.1"
+                      required
+                      className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none text-2xl font-bold"
+                      value={globalStockData.amount}
+                      onChange={(e) => setGlobalStockData({ ...globalStockData, amount: e.target.value })}
+                    />
+                  </div>
+                  <button type="submit" className="w-full py-5 bg-blue-600 text-white rounded-2xl font-bold text-lg">Update Inventory</button>
                 </form>
               </div>
             </motion.div>
@@ -3738,7 +5052,7 @@ function AdminDashboard({ user }: { user: User }) {
             >
               <div className="p-10">
                 <div className="flex justify-between items-center mb-8">
-                  <h3 className="text-2xl font-bold">Add New User</h3>
+                  <h3 className="text-2xl font-bold">{editingUserId ? 'Edit User' : 'Add New User'}</h3>
                   <button onClick={() => setShowUserForm(false)} className="p-2 hover:bg-[#F5F5F0] rounded-full transition-colors">
                     <XCircle className="w-6 h-6 opacity-30" />
                   </button>
@@ -3764,10 +5078,10 @@ function AdminDashboard({ user }: { user: User }) {
                   </div>
 
                   <div className="space-y-2">
-                    <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Password</label>
+                    <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Password {editingUserId && '(Leave blank to keep current)'}</label>
                     <input 
                       type="password" 
-                      required
+                      required={!editingUserId}
                       minLength={6}
                       className="w-full px-6 py-4 bg-[#F5F5F0] rounded-2xl outline-none"
                       value={userData.password}
@@ -3795,6 +5109,8 @@ function AdminDashboard({ user }: { user: User }) {
                     >
                       <option value="agent">Pumping Agent</option>
                       <option value="manager">Station Manager</option>
+                      <option value="distributor">Distributor</option>
+                      <option value="support">Support Staff</option>
                       <option value="admin">Administrator</option>
                     </select>
                   </div>
@@ -3818,7 +5134,7 @@ function AdminDashboard({ user }: { user: User }) {
                     type="submit"
                     className="w-full py-5 bg-[#141414] text-white rounded-2xl font-bold text-lg hover:bg-opacity-90 transition-all"
                   >
-                    Create User
+                    {editingUserId ? 'Update User' : 'Create User'}
                   </button>
                 </form>
               </div>
