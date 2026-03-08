@@ -196,6 +196,27 @@ const getErrorMessage = (err: any) => {
 };
 
 export const api = {
+  getSystemConfig: async () => {
+    try {
+      const configDoc = await getDoc(doc(db, 'system_config', 'settings'));
+      if (configDoc.exists()) {
+        return configDoc.data();
+      }
+      // Default config
+      return { registrationEnabled: true };
+    } catch (error) {
+      console.error("Error getting system config:", error);
+      return { registrationEnabled: true };
+    }
+  },
+  updateSystemConfig: async (data: any) => {
+    try {
+      await setDoc(doc(db, 'system_config', 'settings'), data, { merge: true });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, 'system_config/settings');
+      throw error;
+    }
+  },
   createSystemUser: async (data: any) => {
     try {
       // Generate a unique ID for the user since we aren't using Firebase Auth for these users
@@ -251,6 +272,10 @@ export const api = {
   },
   registerWithEmail: async (data: any) => {
     try {
+      const config = await api.getSystemConfig();
+      if (!config.registrationEnabled) {
+        throw new Error('Registration is currently disabled by administrator.');
+      }
       // const result = await createUserWithEmailAndPassword(auth, data.email, data.password);
       // const firebaseUser = result.user;
       const userId = crypto.randomUUID();
@@ -322,6 +347,10 @@ export const api = {
   },
   completeGoogleRegistration: async (firebaseUser: any, data: any) => {
     try {
+      const config = await api.getSystemConfig();
+      if (!config.registrationEnabled) {
+        throw new Error('Registration is currently disabled by administrator.');
+      }
       const userRef = doc(db, 'users', firebaseUser.uid);
       
       // Check for pre-authorization
@@ -1164,6 +1193,7 @@ export const api = {
 const VEHICLE_TYPES: VehicleType[] = ['Car', 'Motorcycle / Bike', 'Three-Wheeler / Auto Rickshaw', 'Truck', 'Bus', 'Other'];
 
 function RegisterView({ onBack, onSuccess }: { onBack: () => void, onSuccess: () => void }) {
+  const [registrationEnabled, setRegistrationEnabled] = useState(true);
   const [formData, setFormData] = useState({
     email: '',
     username: '',
@@ -1179,8 +1209,20 @@ function RegisterView({ onBack, onSuccess }: { onBack: () => void, onSuccess: ()
   const [msg, setMsg] = useState({ text: '', type: '' });
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    const fetchConfig = async () => {
+      const config = await api.getSystemConfig();
+      setRegistrationEnabled(config.registrationEnabled ?? true);
+      if (!config.registrationEnabled) {
+        setMsg({ text: 'Registration is currently disabled by administrator.', type: 'error' });
+      }
+    };
+    fetchConfig();
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!registrationEnabled) return;
     setLoading(true);
     try {
       await api.registerWithEmail(formData);
@@ -1221,13 +1263,33 @@ function RegisterView({ onBack, onSuccess }: { onBack: () => void, onSuccess: ()
             <button onClick={onBack} className="text-sm font-bold opacity-40 hover:opacity-100 transition-opacity">Back to Login</button>
           </div>
 
-          <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {msg.text && (
-              <div className={`md:col-span-2 p-4 rounded-2xl text-sm flex items-center gap-3 ${msg.type === 'success' ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`}>
-                {msg.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
-                {msg.text}
+          {!registrationEnabled ? (
+            <div className="py-12 text-center space-y-6">
+              <div className="w-20 h-20 bg-amber-50 text-amber-600 rounded-3xl flex items-center justify-center mx-auto">
+                <XCircle className="w-10 h-10" />
               </div>
-            )}
+              <div className="space-y-2">
+                <h3 className="text-xl font-bold">Registration Closed</h3>
+                <p className="opacity-50 max-w-sm mx-auto">
+                  The administrator has temporarily disabled new user registrations. 
+                  Please try again later or contact support if you believe this is an error.
+                </p>
+              </div>
+              <button 
+                onClick={onBack}
+                className="px-8 py-4 bg-[#141414] text-white rounded-2xl font-bold"
+              >
+                Return to Login
+              </button>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {msg.text && (
+                <div className={`md:col-span-2 p-4 rounded-2xl text-sm flex items-center gap-3 ${msg.type === 'success' ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`}>
+                  {msg.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+                  {msg.text}
+                </div>
+              )}
 
             <div className="space-y-2 md:col-span-2">
               <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Username</label>
@@ -1388,6 +1450,7 @@ function RegisterView({ onBack, onSuccess }: { onBack: () => void, onSuccess: ()
               </button>
             </div>
           </form>
+        )}
         </div>
       </div>
     </div>
@@ -1395,6 +1458,7 @@ function RegisterView({ onBack, onSuccess }: { onBack: () => void, onSuccess: ()
 }
 
 function CompleteProfileView({ user, onSuccess, onCancel }: { user: any, onSuccess: (user: User) => void, onCancel: () => void }) {
+  const [registrationEnabled, setRegistrationEnabled] = useState(true);
   const [formData, setFormData] = useState({
     full_name: user.displayName || '',
     nic: '',
@@ -1407,8 +1471,20 @@ function CompleteProfileView({ user, onSuccess, onCancel }: { user: any, onSucce
   const [msg, setMsg] = useState({ text: '', type: '' });
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    const fetchConfig = async () => {
+      const config = await api.getSystemConfig();
+      setRegistrationEnabled(config.registrationEnabled ?? true);
+      if (!config.registrationEnabled) {
+        setMsg({ text: 'Registration is currently disabled by administrator.', type: 'error' });
+      }
+    };
+    fetchConfig();
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!registrationEnabled) return;
     setLoading(true);
     try {
       const newUser = await api.completeGoogleRegistration(user, formData);
@@ -1430,17 +1506,38 @@ function CompleteProfileView({ user, onSuccess, onCancel }: { user: any, onSucce
             <button onClick={onCancel} className="text-sm font-bold opacity-40 hover:opacity-100 transition-opacity">Cancel</button>
           </div>
           
-          <div className="mb-6 p-4 bg-blue-50 text-blue-700 rounded-2xl text-sm">
-            Please provide your vehicle and personal details to complete registration for <strong>{user.email}</strong>.
-          </div>
-
-          <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {msg.text && (
-              <div className={`md:col-span-2 p-4 rounded-2xl text-sm flex items-center gap-3 ${msg.type === 'success' ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`}>
-                {msg.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
-                {msg.text}
+          {!registrationEnabled ? (
+            <div className="py-12 text-center space-y-6">
+              <div className="w-20 h-20 bg-amber-50 text-amber-600 rounded-3xl flex items-center justify-center mx-auto">
+                <XCircle className="w-10 h-10" />
               </div>
-            )}
+              <div className="space-y-2">
+                <h3 className="text-xl font-bold">Registration Closed</h3>
+                <p className="opacity-50 max-w-sm mx-auto">
+                  The administrator has temporarily disabled new user registrations. 
+                  Please try again later or contact support if you believe this is an error.
+                </p>
+              </div>
+              <button 
+                onClick={onCancel}
+                className="px-8 py-4 bg-[#141414] text-white rounded-2xl font-bold"
+              >
+                Return to Home
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="mb-6 p-4 bg-blue-50 text-blue-700 rounded-2xl text-sm">
+                Please provide your vehicle and personal details to complete registration for <strong>{user.email}</strong>.
+              </div>
+
+              <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {msg.text && (
+                  <div className={`md:col-span-2 p-4 rounded-2xl text-sm flex items-center gap-3 ${msg.type === 'success' ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`}>
+                    {msg.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+                    {msg.text}
+                  </div>
+                )}
 
             <div className="space-y-2 md:col-span-2">
               <label className="text-xs font-bold uppercase tracking-widest opacity-40 ml-4">Full Name</label>
@@ -1530,6 +1627,8 @@ function CompleteProfileView({ user, onSuccess, onCancel }: { user: any, onSucce
               </button>
             </div>
           </form>
+        </>
+      )}
         </div>
       </div>
     </div>
@@ -1959,6 +2058,7 @@ function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [registrationEnabled, setRegistrationEnabled] = useState(true);
 
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1985,6 +2085,14 @@ function App() {
     };
     window.addEventListener('open-complaint-modal', handleOpenComplaint);
     return () => window.removeEventListener('open-complaint-modal', handleOpenComplaint);
+  }, []);
+
+  useEffect(() => {
+    const fetchConfig = async () => {
+      const config = await api.getSystemConfig();
+      setRegistrationEnabled(config.registrationEnabled ?? true);
+    };
+    fetchConfig();
   }, []);
 
   useEffect(() => {
@@ -2579,13 +2687,21 @@ function App() {
                 </div>
 
                 <div className="mt-8 pt-8 border-t border-[#141414]/5 text-center">
-                  <p className="text-sm opacity-50 mb-4">Don't have a fuel pass?</p>
-                  <button 
-                    onClick={() => setView('register' as any)}
-                    className="text-sm font-bold hover:underline"
-                  >
-                    Register your vehicle now →
-                  </button>
+                  {registrationEnabled ? (
+                    <>
+                      <p className="text-sm opacity-50 mb-4">Don't have a fuel pass?</p>
+                      <button 
+                        onClick={() => setView('register' as any)}
+                        className="text-sm font-bold hover:underline"
+                      >
+                        Register your vehicle now →
+                      </button>
+                    </>
+                  ) : (
+                    <div className="p-4 bg-amber-50 rounded-2xl text-amber-700 text-xs font-medium">
+                      Public registration is currently closed. Please contact an administrator for assistance.
+                    </div>
+                  )}
                 </div>
               </div>
             </motion.div>
@@ -3709,6 +3825,7 @@ function AdminDashboard({ user }: { user: User }) {
   const [stationReports, setStationReports] = useState<any[]>([]);
   const [distributions, setDistributions] = useState<FuelDistribution[]>([]);
   const [consumptionLogs, setConsumptionLogs] = useState<any[]>([]);
+  const [registrationEnabled, setRegistrationEnabled] = useState(true);
   
   const [reportFilters, setReportFilters] = useState({
     station_id: '',
@@ -3777,6 +3894,8 @@ function AdminDashboard({ user }: { user: User }) {
     if (activeTab === 'users') {
       setUsers(await api.getUsers());
       setStations(await api.getStations());
+      const config = await api.getSystemConfig();
+      setRegistrationEnabled(config.registrationEnabled ?? true);
     }
     if (activeTab === 'vehicles') setVehicles(await api.getVehicles());
     if (activeTab === 'stations') setStations(await api.getStations());
@@ -3956,6 +4075,17 @@ function AdminDashboard({ user }: { user: User }) {
       setStationStockData({ petrol_92: '', petrol_95: '', diesel: '', super_diesel: '' });
       loadData();
       setTimeout(() => setShowStationStockForm(false), 1500);
+    } catch (err: any) {
+      setMsg({ text: getErrorMessage(err), type: 'error' });
+    }
+  };
+
+  const handleToggleRegistration = async () => {
+    try {
+      const newValue = !registrationEnabled;
+      await api.updateSystemConfig({ registrationEnabled: newValue });
+      setRegistrationEnabled(newValue);
+      setMsg({ text: `Registration ${newValue ? 'enabled' : 'disabled'} successfully!`, type: 'success' });
     } catch (err: any) {
       setMsg({ text: getErrorMessage(err), type: 'error' });
     }
@@ -4497,9 +4627,31 @@ function AdminDashboard({ user }: { user: User }) {
             key="users"
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="bg-white rounded-3xl border border-[#141414]/5 shadow-sm overflow-hidden"
+            className="space-y-6"
           >
-            <div className="overflow-x-auto">
+            <div className="bg-white p-6 rounded-3xl border border-[#141414]/5 shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+              <div>
+                <h3 className="font-bold text-lg">User Registration Control</h3>
+                <p className="text-sm opacity-50">Enable or disable new public user registration</p>
+              </div>
+              <button 
+                onClick={handleToggleRegistration}
+                className={`px-6 py-3 rounded-2xl font-bold transition-all flex items-center gap-2 ${
+                  registrationEnabled 
+                    ? 'bg-green-100 text-green-700 hover:bg-green-200' 
+                    : 'bg-red-100 text-red-700 hover:bg-red-200'
+                }`}
+              >
+                {registrationEnabled ? (
+                  <><CheckCircle2 className="w-5 h-5" /> Registration Active</>
+                ) : (
+                  <><XCircle className="w-5 h-5" /> Registration Disabled</>
+                )}
+              </button>
+            </div>
+
+            <div className="bg-white rounded-3xl border border-[#141414]/5 shadow-sm overflow-hidden">
+              <div className="overflow-x-auto">
               <table className="w-full text-left">
                 <thead>
                   <tr className="bg-[#F5F5F0]/50 text-[10px] uppercase tracking-widest font-bold opacity-50">
@@ -4534,6 +4686,7 @@ function AdminDashboard({ user }: { user: User }) {
                 </tbody>
               </table>
             </div>
+          </div>
           </motion.div>
         )}
 
