@@ -3529,6 +3529,7 @@ function ManagerDashboard({ user }: { user: User }) {
 
 
 function PublicStationBalances() {
+  console.log('PublicStationBalances rendered');
   const [stations, setStations] = useState<FuelStation[]>([]);
   const [agents, setAgents] = useState<User[]>([]);
   const [transactions, setTransactions] = useState<FuelTransaction[]>([]);
@@ -3537,10 +3538,16 @@ function PublicStationBalances() {
   const [sortBy, setSortBy] = useState<'name' | 'location'>('name');
 
   useEffect(() => {
+    console.log('Fetching station data...');
     Promise.all([api.getStationBalances(), api.getAgents(), api.getDetailedTransactions()]).then(([stations, agents, transactions]) => {
+      console.log('Fetched stations:', stations);
+      console.log('Number of stations:', stations.length);
       setStations(stations);
       setAgents(agents);
       setTransactions(transactions);
+      setLoading(false);
+    }).catch(err => {
+      console.error('Error fetching station data:', err);
       setLoading(false);
     });
   }, []);
@@ -3563,6 +3570,11 @@ function PublicStationBalances() {
 
   return (
     <div className="space-y-6">
+      <div className="flex justify-end">
+        <button onClick={() => window.location.reload()} className="px-4 py-2 bg-[#141414] text-white rounded-xl text-xs font-bold hover:bg-opacity-90 transition-all">
+          Refresh Data
+        </button>
+      </div>
       <div className="flex flex-col md:flex-row gap-4 items-center justify-between bg-white/50 p-4 rounded-3xl border border-[#141414]/5">
         <div className="relative w-full md:w-96">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 opacity-30" />
@@ -3628,19 +3640,19 @@ function PublicStationBalances() {
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-1">Petrol 92</p>
-                      <p className="text-xl font-bold">{station.balance_petrol_92.toLocaleString()}L</p>
+                      <p className="text-xl font-bold">{(station.balance_petrol_92 || 0).toLocaleString()}L</p>
                     </div>
                     <div>
                       <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-1">Petrol 95</p>
-                      <p className="text-xl font-bold">{station.balance_petrol_95.toLocaleString()}L</p>
+                      <p className="text-xl font-bold">{(station.balance_petrol_95 || 0).toLocaleString()}L</p>
                     </div>
                     <div>
                       <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-1">Diesel</p>
-                      <p className="text-xl font-bold">{station.balance_diesel.toLocaleString()}L</p>
+                      <p className="text-xl font-bold">{(station.balance_diesel || 0).toLocaleString()}L</p>
                     </div>
                     <div>
                       <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-1">Super Diesel</p>
-                      <p className="text-xl font-bold">{station.balance_super_diesel.toLocaleString()}L</p>
+                      <p className="text-xl font-bold">{(station.balance_super_diesel || 0).toLocaleString()}L</p>
                     </div>
                   </div>
                 </div>
@@ -4254,29 +4266,7 @@ function AdminDashboard({ user }: { user: User }) {
           >
             <AnalyticsDashboard typeLimits={typeLimits} />
             
-            {user.role === 'admin' && (
-              <div className="bg-white/70 backdrop-blur-xl p-10 rounded-[2.5rem] border border-white/40 shadow-xl shadow-black/5">
-                <h3 className="text-xl font-bold mb-8 flex items-center gap-3">
-                  <Database className="w-6 h-6 text-amber-500" />
-                  Database Seeding
-                </h3>
-                <button 
-                  onClick={handleSeed}
-                  disabled={isSeeding}
-                  className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-bold hover:bg-amber-600 transition-all disabled:opacity-50"
-                >
-                  {isSeeding ? 'Seeding...' : 'Seed Database'}
-                </button>
-                {isSeeding && (
-                  <div className="mt-4 w-full bg-gray-200 rounded-full h-2.5">
-                    <div className="bg-amber-500 h-2.5 rounded-full" style={{ width: `${seedingProgress}%` }}></div>
-                  </div>
-                )}
-                {msg.text && (
-                  <p className={`mt-4 ${msg.type === 'success' ? 'text-green-600' : 'text-red-600'}`}>{msg.text}</p>
-                )}
-              </div>
-            )}
+            {/* Database Seeding removed */}
             
             {user.role === 'admin' && distSummary && (
               <div className="bg-white/70 backdrop-blur-xl p-10 rounded-[2.5rem] border border-white/40 shadow-xl shadow-black/5">
@@ -4287,19 +4277,19 @@ function AdminDashboard({ user }: { user: User }) {
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                   <div className="bg-blue-50 p-6 rounded-3xl">
                     <p className="text-[10px] uppercase font-bold opacity-40 mb-1">Total Petrol 92</p>
-                    <p className="text-2xl font-bold">{distSummary.totalPetrol92.toLocaleString()}L</p>
+                    <p className="text-2xl font-bold">{(distSummary.totalPetrol92 || 0).toLocaleString()}L</p>
                   </div>
                   <div className="bg-indigo-50 p-6 rounded-3xl">
                     <p className="text-[10px] uppercase font-bold opacity-40 mb-1">Total Petrol 95</p>
-                    <p className="text-2xl font-bold">{distSummary.totalPetrol95.toLocaleString()}L</p>
+                    <p className="text-2xl font-bold">{(distSummary.totalPetrol95 || 0).toLocaleString()}L</p>
                   </div>
                   <div className="bg-emerald-50 p-6 rounded-3xl">
                     <p className="text-[10px] uppercase font-bold opacity-40 mb-1">Total Diesel</p>
-                    <p className="text-2xl font-bold">{distSummary.totalDiesel.toLocaleString()}L</p>
+                    <p className="text-2xl font-bold">{(distSummary.totalDiesel || 0).toLocaleString()}L</p>
                   </div>
                   <div className="bg-teal-50 p-6 rounded-3xl">
                     <p className="text-[10px] uppercase font-bold opacity-40 mb-1">Total Super Diesel</p>
-                    <p className="text-2xl font-bold">{distSummary.totalSuperDiesel.toLocaleString()}L</p>
+                    <p className="text-2xl font-bold">{(distSummary.totalSuperDiesel || 0).toLocaleString()}L</p>
                   </div>
                 </div>
               </div>

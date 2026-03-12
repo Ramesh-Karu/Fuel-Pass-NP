@@ -21,19 +21,19 @@ export function FuelPriceDisplay() {
       <div className="grid grid-cols-2 gap-6">
         <div>
           <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-1">Petrol 92</p>
-          <p className="text-2xl font-bold">{prices.petrol_92.toLocaleString()}</p>
+          <p className="text-2xl font-bold">{(prices.petrol_92 || 0).toLocaleString()}</p>
         </div>
         <div>
           <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-1">Petrol 95</p>
-          <p className="text-2xl font-bold">{prices.petrol_95.toLocaleString()}</p>
+          <p className="text-2xl font-bold">{(prices.petrol_95 || 0).toLocaleString()}</p>
         </div>
         <div>
           <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-1">Diesel</p>
-          <p className="text-2xl font-bold">{prices.diesel.toLocaleString()}</p>
+          <p className="text-2xl font-bold">{(prices.diesel || 0).toLocaleString()}</p>
         </div>
         <div>
           <p className="text-[10px] uppercase tracking-widest font-bold opacity-40 mb-1">Super Diesel</p>
-          <p className="text-2xl font-bold">{prices.super_diesel.toLocaleString()}</p>
+          <p className="text-2xl font-bold">{(prices.super_diesel || 0).toLocaleString()}</p>
         </div>
       </div>
       <div className="mt-6 pt-6 border-t border-[#141414]/5 flex items-center gap-2 text-xs opacity-40 font-bold">
