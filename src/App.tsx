@@ -28,7 +28,8 @@ import {
   MessageSquare,
   Filter,
   Fingerprint,
-  Key
+  Key,
+  Database
 } from 'lucide-react';
 import { startRegistration, startAuthentication } from '@simplewebauthn/browser';
 import { motion, AnimatePresence } from 'motion/react';
@@ -217,15 +218,17 @@ export const api = {
       throw error;
     }
   },
-  seedDatabase: async () => {
+  seedDatabase: async (onProgress: (progress: number) => void) => {
     try {
       // Seed default stations
       const stations = [
         { name: 'Main Station', location: 'Jaffna', status: 'active' },
         { name: 'North Station', location: 'Kilinochchi', status: 'active' }
       ];
-      for (const station of stations) {
-        await addDoc(collection(db, 'stations'), station);
+      const total = stations.length;
+      for (let i = 0; i < total; i++) {
+        await addDoc(collection(db, 'stations'), stations[i]);
+        onProgress(((i + 1) / total) * 100);
       }
       return true;
     } catch (error) {
@@ -2597,20 +2600,6 @@ function App() {
                 </div>
 
                 <div className="space-y-6">
-                  <button 
-                    onClick={async () => {
-                      const email = prompt('Enter admin email:');
-                      if (email === 'rameshnathankaruvoolan10@gmail.com') {
-                        await api.seedDatabase();
-                        alert('Database seeded!');
-                      } else {
-                        alert('Unauthorized');
-                      }
-                    }}
-                    className="w-full py-4 bg-amber-500 text-white rounded-2xl font-bold hover:bg-amber-600 transition-all"
-                  >
-                    Seed Database
-                  </button>
                   {error && (
                     <div className="p-4 bg-red-50/50 backdrop-blur-md text-red-600 rounded-2xl text-sm flex items-center gap-3">
                       <AlertCircle className="w-5 h-5" />
@@ -3888,6 +3877,22 @@ function AdminDashboard({ user }: { user: User }) {
   const [globalStockData, setGlobalStockData] = useState({ fuel_type: 'Petrol 92', amount: '' });
 
   const [msg, setMsg] = useState({ text: '', type: '' });
+  const [isSeeding, setIsSeeding] = useState(false);
+  const [seedingProgress, setSeedingProgress] = useState(0);
+
+  const handleSeed = async () => {
+    setIsSeeding(true);
+    setSeedingProgress(0);
+    try {
+      await api.seedDatabase((progress) => setSeedingProgress(progress));
+      setMsg({ text: 'Database seeded successfully!', type: 'success' });
+    } catch (error) {
+      setMsg({ text: 'Error seeding database.', type: 'error' });
+    } finally {
+      setIsSeeding(false);
+      setSeedingProgress(0);
+    }
+  };
 
   const tabs = [
     { id: 'overview', icon: TrendingUp, label: 'Analytics', roles: ['admin', 'distributor'] },
@@ -4248,6 +4253,30 @@ function AdminDashboard({ user }: { user: User }) {
             className="space-y-8"
           >
             <AnalyticsDashboard typeLimits={typeLimits} />
+            
+            {user.role === 'admin' && (
+              <div className="bg-white/70 backdrop-blur-xl p-10 rounded-[2.5rem] border border-white/40 shadow-xl shadow-black/5">
+                <h3 className="text-xl font-bold mb-8 flex items-center gap-3">
+                  <Database className="w-6 h-6 text-amber-500" />
+                  Database Seeding
+                </h3>
+                <button 
+                  onClick={handleSeed}
+                  disabled={isSeeding}
+                  className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-bold hover:bg-amber-600 transition-all disabled:opacity-50"
+                >
+                  {isSeeding ? 'Seeding...' : 'Seed Database'}
+                </button>
+                {isSeeding && (
+                  <div className="mt-4 w-full bg-gray-200 rounded-full h-2.5">
+                    <div className="bg-amber-500 h-2.5 rounded-full" style={{ width: `${seedingProgress}%` }}></div>
+                  </div>
+                )}
+                {msg.text && (
+                  <p className={`mt-4 ${msg.type === 'success' ? 'text-green-600' : 'text-red-600'}`}>{msg.text}</p>
+                )}
+              </div>
+            )}
             
             {user.role === 'admin' && distSummary && (
               <div className="bg-white/70 backdrop-blur-xl p-10 rounded-[2.5rem] border border-white/40 shadow-xl shadow-black/5">
