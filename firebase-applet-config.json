@@ -1,10 +1,10 @@
 {
-  "projectId": "neon-emitter-469412-c5",
-  "appId": "1:745349893194:web:7210dd84b19f04d6052ab3",
-  "apiKey": "AIzaSyBNty1Kgf9lq4oXMwrzyR7rk3VVvkBQJZE",
-  "authDomain": "neon-emitter-469412-c5.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-72cd3fa9-a801-4308-afc4-7bda725e1596",
-  "storageBucket": "neon-emitter-469412-c5.firebasestorage.app",
-  "messagingSenderId": "745349893194",
-  "measurementId": ""
+  "apiKey": "AIzaSyBODv0QpEaoIGwcOpKQjY0dw97mMQ3GP_s",
+  "authDomain": "np-fuel-pass.firebaseapp.com",
+  "projectId": "np-fuel-pass",
+  "appId": "1:157746088243:web:0d91789af8c1a769815646",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "np-fuel-pass.firebasestorage.app",
+  "messagingSenderId": "157746088243",
+  "measurementId": "G-BM94CJD5YY"
 }

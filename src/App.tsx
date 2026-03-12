@@ -217,6 +217,22 @@ export const api = {
       throw error;
     }
   },
+  seedDatabase: async () => {
+    try {
+      // Seed default stations
+      const stations = [
+        { name: 'Main Station', location: 'Jaffna', status: 'active' },
+        { name: 'North Station', location: 'Kilinochchi', status: 'active' }
+      ];
+      for (const station of stations) {
+        await addDoc(collection(db, 'stations'), station);
+      }
+      return true;
+    } catch (error) {
+      console.error("Error seeding database:", error);
+      throw error;
+    }
+  },
   createSystemUser: async (data: any) => {
     try {
       // Generate a unique ID for the user since we aren't using Firebase Auth for these users
@@ -2581,6 +2597,20 @@ function App() {
                 </div>
 
                 <div className="space-y-6">
+                  <button 
+                    onClick={async () => {
+                      const email = prompt('Enter admin email:');
+                      if (email === 'rameshnathankaruvoolan10@gmail.com') {
+                        await api.seedDatabase();
+                        alert('Database seeded!');
+                      } else {
+                        alert('Unauthorized');
+                      }
+                    }}
+                    className="w-full py-4 bg-amber-500 text-white rounded-2xl font-bold hover:bg-amber-600 transition-all"
+                  >
+                    Seed Database
+                  </button>
                   {error && (
                     <div className="p-4 bg-red-50/50 backdrop-blur-md text-red-600 rounded-2xl text-sm flex items-center gap-3">
                       <AlertCircle className="w-5 h-5" />
